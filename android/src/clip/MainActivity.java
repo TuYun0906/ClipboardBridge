@@ -12,7 +12,6 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -32,11 +31,15 @@ public final class MainActivity extends Activity {
     private ClipboardManager clipboard;
     private TextView status, mediaHint, authorize;
     private EditText host, pair;
-    private Switch show, media, internet, auto;
+    private Switch media, internet, auto;
     private boolean updating, configuredMode;
     private final ClipboardManager.OnPrimaryClipChangedListener clipChanges = this::captureFocused;
     private final BroadcastReceiver statusChanges = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
+            if (SyncService.HISTORY.equals(intent.getAction())) {
+                if (refreshHistory != null) refreshHistory.run();
+                return;
+            }
             refreshStatus();
             captureFocused();
         }
@@ -61,6 +64,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         clipboard.addPrimaryClipChangedListener(clipChanges);
         IntentFilter filter = new IntentFilter(SyncService.STATUS);
+        filter.addAction(SyncService.HISTORY);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(statusChanges, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(statusChanges, filter);
     }
@@ -70,7 +74,6 @@ public final class MainActivity extends Activity {
         SyncService.start(this);
         refreshStatus();
         updating = true;
-        show.setChecked(prefs.getBoolean(Prefs.SHOW, false) && Settings.canDrawOverlays(this));
         media.setChecked(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
         updating = false;
     }
@@ -145,7 +148,7 @@ public final class MainActivity extends Activity {
             host.setText(prefs.getString(enabled ? Prefs.WAN : Prefs.LAN, ""));
         });
 
-        LinearLayout options = card(root, "同步与浮窗");
+        LinearLayout options = card(root, "同步与历史");
         Switch saveImages = toggle(options, "历史记录保存图片",
                 prefs.getBoolean(ClipHistory.SAVE_IMAGES, false));
         saveImages.setOnCheckedChangeListener((button, enabled) ->
@@ -171,14 +174,6 @@ public final class MainActivity extends Activity {
         mediaHint = Style.label(this, "✓ 已开启截图与拍照同步", 13, Style.BLUE, true);
         mediaHint.setVisibility(View.GONE);
         options.addView(mediaHint);
-        show = toggle(options, "显示浮窗", false);
-        show.setOnCheckedChangeListener((button, enabled) -> {
-            if (updating) return;
-            prefs.edit().putBoolean(Prefs.SHOW, enabled).apply();
-            if (enabled && !Settings.canDrawOverlays(this)) {
-                startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
-            }
-        });
         setContentView(scroll);
         if (Build.VERSION.SDK_INT >= 30) scroll.post(() -> {
             WindowInsetsController controller = scroll.getWindowInsetsController();
@@ -271,6 +266,8 @@ public final class MainActivity extends Activity {
         else Toast.makeText(this, "同步服务正在启动", Toast.LENGTH_SHORT).show();
     }
 
+    private Runnable refreshHistory;
+
     private void showHistory() {
         SyncService service = SyncService.running;
         if (service == null) return;
@@ -304,17 +301,25 @@ public final class MainActivity extends Activity {
             @Override public void afterTextChanged(android.text.Editable value) { }
         });
         list.setOnItemClickListener((parent, view, position, id) -> {
-            if (position < matches.size()) service.copyHistory(matches.get(position));
+            if (position >= matches.size()) return;
+            ClipHistory.Entry entry = matches.get(position);
+            new AlertDialog.Builder(this).setItems(new String[]{"复制", "删除"}, (menu, choice) -> {
+                if (choice == 0) service.copyHistory(entry);
+                else service.deleteHistory(entry);
+            }).show();
         });
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("剪贴板历史")
                 .setView(body).setPositiveButton("关闭", null).create();
         dialog.show();
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-        service.loadHistory(result -> {
+        refreshHistory = () -> service.loadHistory(result -> {
             if (!dialog.isShowing()) return;
+            entries.clear();
             entries.addAll(result);
             refresh.run();
         });
+        dialog.setOnDismissListener(ignored -> refreshHistory = null);
+        refreshHistory.run();
     }
 
     private void refreshStatus() {

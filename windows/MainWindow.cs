@@ -86,6 +86,11 @@ internal sealed class MainWindow : Window
                 var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 36 };
                 var copy = Action("复制", false, () => program.CopyHistory(entry.Path));
                 copy.Width = 62;
+                var delete = Action("删除", false, () => program.DeleteHistory(entry.Key));
+                delete.Width = 62;
+                delete.Margin = new Thickness(6, 0, 0, 0);
+                DockPanel.SetDock(delete, Dock.Right);
+                row.Children.Add(delete);
                 DockPanel.SetDock(copy, Dock.Right);
                 row.Children.Add(copy);
                 var text = Label(entry.Label, 14, Ink, false);

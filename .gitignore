@@ -2,6 +2,7 @@
 /android/deps/*
 !/android/deps/SHIZUKU-LICENSE.txt
 /tests/tls-build/
+/tests/history-build-*/
 /tests/classes/
 *.apk
 *.exe

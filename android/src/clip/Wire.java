@@ -7,7 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 final class Wire {
-    static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4;
+    static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4, HISTORY_TEXT = 5, HISTORY_IMAGE = 6, DELETE = 7;
     static final int ID_SIZE = 16, KEY_SIZE = 32;
     static final int TEXT_LIMIT = 1024 * 1024, IMAGE_LIMIT = 24 * 1024 * 1024;
 
@@ -51,8 +51,11 @@ final class Wire {
         boolean valid;
         switch (kind) {
             case AUTH: valid = count == KEY_SIZE; break;
+            case DELETE:
             case ACK: valid = count == 0; break;
+            case HISTORY_TEXT:
             case TEXT: valid = count > 0 && count <= TEXT_LIMIT; break;
+            case HISTORY_IMAGE:
             case IMAGE: valid = count > 0 && count <= IMAGE_LIMIT; break;
             default: valid = false; break;
         }

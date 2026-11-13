@@ -13,12 +13,12 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
-import android.provider.Settings;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Base64;
 
 public final class SyncService extends Service {
+    static final String HISTORY = "clip.bridge.HISTORY";
     static final String STATUS = "clip.bridge.SYNC_STATUS";
     private static final String CHANNEL = "clipboard_link";
     private static final int NOTICE = 11;
@@ -36,8 +36,7 @@ public final class SyncService extends Service {
     private ClipHistory history;
     private BackgroundClipboard background;
     private MediaWatcher media;
-    private FloatingPanel panel;
-    private SyncClient client;
+    private volatile SyncClient client;
     private String endpoint;
     private String token;
     private boolean internet;
@@ -56,7 +55,6 @@ public final class SyncService extends Service {
         io.start();
         worker = new Handler(io.getLooper());
         media = new MediaWatcher(this, worker, this::sendOnWorker);
-        panel = new FloatingPanel(this);
         background = new BackgroundClipboard(this, this::send,
                 () -> sendBroadcast(new Intent(STATUS).setPackage(getPackageName())));
         prefs.registerOnSharedPreferenceChangeListener(changes);
@@ -80,7 +78,6 @@ public final class SyncService extends Service {
         background.close();
         media.update(false);
         io.quitSafely();
-        panel.hide();
         running = null;
         super.onDestroy();
     }
@@ -109,6 +106,23 @@ public final class SyncService extends Service {
         });
     }
 
+    void deleteHistory(ClipHistory.Entry entry) {
+        worker.post(() -> record(ClipHistory.tombstone(entry.key), true));
+    }
+
+    private void record(Wire.Frame frame, boolean local) {
+        try {
+            java.util.List<Wire.Frame> changes = history.apply(frame, local);
+            SyncClient target = client;
+            if (target != null)
+                for (Wire.Frame change : changes)
+                    if (local || change.kind == Wire.DELETE) target.publish(change);
+            if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
+        } catch (IOException error) {
+            android.util.Log.w("ClipHistory", "History write failed", error);
+        }
+    }
+
     void copyHistory(ClipHistory.Entry entry) {
         worker.post(() -> {
             String result;
@@ -132,7 +146,7 @@ public final class SyncService extends Service {
     private void process(Object snapshot, boolean transmit) {
         try {
             Wire.Frame frame = clipboard.makeFrame(snapshot);
-            history.add(frame);
+            record(frame, true);
             if (!transmit) return;
             main.post(() -> {
                 if (client == null) {
@@ -163,21 +177,27 @@ public final class SyncService extends Service {
                 final Object connection = new Object();
                 currentConnection = connection;
                 client = new SyncClient(host, Prefs.PORT, pin, key, frame -> {
-                    clipboard.apply(frame);
-                    history.add(frame);
+                    if (frame.kind >= Wire.HISTORY_TEXT) {
+                        Wire.Frame entry = frame;
+                        if (frame.kind != Wire.DELETE)
+                            entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data);
+                        record(entry, false);
+                    } else {
+                        clipboard.apply(frame);
+                        if (frame.kind == Wire.TEXT) record(frame, false);
+                    }
                 }, connected ->
                         main.post(() -> {
                             if (currentConnection == connection && client != null)
                                 setStatus(connected ? "已连接" : "正在重连…");
                         }));
                 setStatus("正在连接…");
+                client.replayWith(history::replay);
                 client.start();
             }
         }
         media.update(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
         background.enable(client != null && prefs.getBoolean(Prefs.AUTO, false));
-        if (prefs.getBoolean(Prefs.SHOW, false) && Settings.canDrawOverlays(this)) panel.show();
-        else panel.hide();
     }
 
     private Object currentConnection;
@@ -191,7 +211,6 @@ public final class SyncService extends Service {
 
     private void setStatus(String value) {
         status = value;
-        panel.updateStatus(value);
         getSystemService(NotificationManager.class).notify(NOTICE, notification());
         sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
     }

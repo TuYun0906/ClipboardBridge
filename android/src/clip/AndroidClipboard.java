@@ -130,7 +130,10 @@ final class AndroidClipboard {
 
     private static byte[] id() {
         UUID uuid = UUID.randomUUID();
-        return ByteBuffer.allocate(Wire.ID_SIZE).putLong(uuid.getMostSignificantBits())
+        byte[] id = ByteBuffer.allocate(Wire.ID_SIZE).putLong(uuid.getMostSignificantBits())
                 .putLong(uuid.getLeastSignificantBits()).array();
+        long time = System.currentTimeMillis();
+        for (int i = 5; i >= 0; i--, time >>= 8) id[i] = (byte) time;
+        return id;
     }
 }

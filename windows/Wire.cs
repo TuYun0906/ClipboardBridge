@@ -17,7 +17,7 @@ internal sealed class Frame
 
 internal static class Wire
 {
-    internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4;
+    internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4, HistoryText = 5, HistoryImage = 6, Delete = 7;
     internal const int IdSize = 16, KeySize = 32;
     internal const int TextLimit = 1024 * 1024, ImageLimit = 24 * 1024 * 1024;
 
@@ -66,8 +66,11 @@ internal static class Wire
         switch (kind)
         {
             case Auth: valid = count == KeySize; break;
+            case Delete:
             case Ack: valid = count == 0; break;
+            case HistoryText:
             case Text: valid = count > 0 && count <= TextLimit; break;
+            case HistoryImage:
             case Image: valid = count > 0 && count <= ImageLimit; break;
             default: valid = false; break;
         }

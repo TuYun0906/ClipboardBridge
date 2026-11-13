@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -18,13 +19,27 @@ internal sealed class SyncServer : IDisposable
     private TcpClient socket;
     private TlsLink link;
     private Frame pending, sent;
+    private readonly Queue<Frame> history = new Queue<Frame>();
+    private readonly Func<IEnumerable<Frame>> replay;
+    private bool replayNeeded;
+
+    internal void Publish(Frame frame)
+    {
+        lock (gate)
+        {
+            if (closed || link == null) return;
+            history.Enqueue(frame);
+            ScheduleWrite();
+        }
+    }
     private byte[] lastApplied;
 
-    internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame> receive, Action<bool> status)
+    internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame> receive, Action<bool> status, Func<IEnumerable<Frame>> replay = null)
     {
         this.identity = identity;
         this.receive = receive;
         this.status = status;
+        this.replay = replay;
         listener = new TcpListener(address, port);
     }
 
@@ -67,6 +82,7 @@ internal sealed class SyncServer : IDisposable
                         if (closed) return;
                         link = current;
                         sent = null;
+                        replayNeeded = replay != null;
                         ScheduleWrite();
                     }
                     connected = true;
@@ -80,14 +96,14 @@ internal sealed class SyncServer : IDisposable
                         }
                         else
                         {
-                            if (frame.Kind != Wire.Text && frame.Kind != Wire.Image)
+                            if (frame.Kind < Wire.Text || frame.Kind > Wire.Delete)
                                 throw new IOException("Unexpected message");
-                            if (lastApplied == null || !lastApplied.SequenceEqual(frame.Id))
+                            if (frame.Kind >= Wire.HistoryText || lastApplied == null || !lastApplied.SequenceEqual(frame.Id))
                             {
                                 receive(frame);
-                                lastApplied = frame.Id;
+                                if (frame.Kind < Wire.HistoryText) lastApplied = frame.Id;
                             }
-                            current.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
+                            if (frame.Kind < Wire.HistoryText) current.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
                         }
                     }
                 }
@@ -104,6 +120,7 @@ internal sealed class SyncServer : IDisposable
                 {
                     socket = null;
                     link = null;
+                    history.Clear();
                 }
                 if (connected && !IsClosed()) status(false);
             }
@@ -114,7 +131,7 @@ internal sealed class SyncServer : IDisposable
 
     private void ScheduleWrite()
     {
-        if (closed || writing || link == null || pending == null || pending == sent) return;
+        if (closed || writing || link == null || (history.Count == 0 && !replayNeeded && (pending == null || pending == sent))) return;
         writing = true;
         ThreadPool.QueueUserWorkItem(delegate { WriteLatest(); });
     }
@@ -124,19 +141,25 @@ internal sealed class SyncServer : IDisposable
         while (true)
         {
             TlsLink current;
-            Frame frame;
+            Frame frame = null;
+            bool restore = false;
             lock (gate)
             {
                 current = link;
-                frame = pending;
-                if (closed || current == null || frame == null || frame == sent)
+                if (closed || current == null || (history.Count == 0 && !replayNeeded && (pending == null || pending == sent)))
                 {
                     writing = false;
                     return;
                 }
-                sent = frame;
+                if (pending != null && pending != sent) { frame = pending; sent = frame; }
+                else if (replayNeeded) { restore = true; replayNeeded = false; }
+                else frame = history.Dequeue();
             }
-            try { current.Send(frame); }
+            try
+            {
+                if (restore) foreach (Frame entry in replay()) current.Send(entry);
+                else current.Send(frame);
+            }
             catch (IOException) { Drop(current); }
             catch (ObjectDisposedException) { Drop(current); }
         }

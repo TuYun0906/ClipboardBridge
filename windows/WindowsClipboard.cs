@@ -82,6 +82,14 @@ internal sealed class WindowsClipboard : IDisposable
         retry.Stop();
     }
 
+    private static byte[] NewId()
+    {
+        byte[] id = Guid.NewGuid().ToByteArray();
+        long time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        for (int i = 5; i >= 0; i--, time >>= 8) id[i] = (byte)time;
+        return id;
+    }
+
     internal static Frame ToFrame(object content)
     {
         string text = content as string;
@@ -89,7 +97,7 @@ internal sealed class WindowsClipboard : IDisposable
         {
             if (text.Length == 0 || Utf8.GetByteCount(text) > Wire.TextLimit)
                 throw new IOException("文字超过大小限制");
-            return new Frame(Wire.Text, Guid.NewGuid().ToByteArray(), Utf8.GetBytes(text));
+            return new Frame(Wire.Text, NewId(), Utf8.GetBytes(text));
         }
 
         BitmapSource bitmap = content as BitmapSource;
@@ -109,7 +117,7 @@ internal sealed class WindowsClipboard : IDisposable
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             encoder.Save(png);
             if (png.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");
-            return new Frame(Wire.Image, Guid.NewGuid().ToByteArray(), png.ToArray());
+            return new Frame(Wire.Image, NewId(), png.ToArray());
         }
     }
 

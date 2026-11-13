@@ -7,7 +7,7 @@ import android.content.pm.PackageManager;
 
 final class Prefs {
     static final int PORT = 47832;
-    static final String AUTO = "auto", SHOW = "show", MEDIA = "media", INTERNET = "internet";
+    static final String AUTO = "auto", MEDIA = "media", INTERNET = "internet";
     static final String LAN = "lan", WAN = "wan", PAIR = "pair";
 
     static SharedPreferences get(Context context) { return context.getSharedPreferences("clipboard", 0); }

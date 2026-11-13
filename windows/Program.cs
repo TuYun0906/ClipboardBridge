@@ -26,7 +26,7 @@ internal sealed class Program : IDisposable
     private readonly Icon trayIcon;
     private readonly WindowsClipboard clipboard;
     private readonly TaskScheduler encoding = new ConcurrentExclusiveSchedulerPair().ExclusiveScheduler;
-    private SyncServer server;
+    private volatile SyncServer server;
     private IPAddress address;
     private bool disposed;
     private bool exiting;
@@ -149,17 +149,28 @@ internal sealed class Program : IDisposable
         }
     }
 
+    internal void DeleteHistory(string key)
+    {
+        Task.Factory.StartNew(() => Record(ClipHistory.Tombstone(key), true),
+            CancellationToken.None, TaskCreationOptions.None, encoding);
+    }
+
     internal void CopyHistory(string path)
     {
         try { Clipboard.SetDataObject(WindowsClipboard.ToClipboardData(ClipHistory.Read(path)), false); }
         catch (Exception error) { SetStatus("复制失败：" + error.Message); }
     }
 
-    private void Record(Frame frame)
+    private void Record(Frame frame, bool local)
     {
         try
         {
-            if (History.Add(frame)) app.Dispatcher.BeginInvoke(new Action(() =>
+            Frame[] changes = History.Apply(frame, local);
+            SyncServer target = server;
+            if (target != null)
+                foreach (Frame change in changes)
+                    if (local || change.Kind == Wire.Delete) target.Publish(change);
+            if (changes.Length > 0) app.Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (HistoryChanged != null) HistoryChanged();
             }));
@@ -191,7 +202,7 @@ internal sealed class Program : IDisposable
             {
                 Frame frame = WindowsClipboard.ToFrame(content);
                 if (target != null) target.Submit(frame);
-                Record(frame);
+                Record(frame, true);
             }
             catch (Exception error)
             {
@@ -202,6 +213,13 @@ internal sealed class Program : IDisposable
 
     private void Receive(Frame frame)
     {
+        if (frame.Kind >= Wire.HistoryText)
+        {
+            if (frame.Kind == Wire.HistoryText || frame.Kind == Wire.HistoryImage)
+                frame = new Frame(frame.Kind == Wire.HistoryText ? Wire.Text : Wire.Image, frame.Id, frame.Data);
+            Record(frame, false);
+            return;
+        }
         DataObject value;
         try { value = WindowsClipboard.ToClipboardData(frame); }
         catch (Exception error) { throw new IOException("Invalid clipboard payload", error); }
@@ -210,7 +228,7 @@ internal sealed class Program : IDisposable
             try
             {
                 app.Dispatcher.Invoke(new Action(() => Clipboard.SetDataObject(value, false)));
-                Record(frame);
+                if (frame.Kind == Wire.Text) Record(frame, false);
                 return;
             }
             catch (ExternalException) { Thread.Sleep(45); }
@@ -239,7 +257,7 @@ internal sealed class Program : IDisposable
                 app.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (server == next) SetStatus(connected ? "已连接" : "等待手机连接");
-                })));
+                })), History.Replay);
             server = next;
             next.Start();
             SetStatus("等待手机连接");

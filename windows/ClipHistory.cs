@@ -8,27 +8,44 @@ internal sealed class ClipHistory
 {
     internal sealed class Entry
     {
-        internal string Path, Label, Text;
+        internal string Path, Label, Text, Key;
+        internal byte Kind;
     }
 
     private readonly string directory;
-    private readonly List<Entry> entries = new List<Entry>();
+    private readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>();
+    private readonly HashSet<string> deleted = new HashSet<string>();
     internal volatile bool SaveImages;
 
     internal ClipHistory(string directory)
     {
         this.directory = directory;
         Directory.CreateDirectory(directory);
-        foreach (string path in Directory.GetFiles(directory, "*.clip").OrderByDescending(Path.GetFileName))
+        foreach (string path in Directory.GetFiles(directory, "*.deleted"))
+            deleted.Add(Path.GetFileNameWithoutExtension(path));
+        foreach (string path in Directory.GetFiles(directory, "*.clip"))
         {
             try
             {
-                var entry = Describe(path, Read(path));
-                if (entry != null) entries.Add(entry);
+                Frame frame = Read(path);
+                if (frame == null || (frame.Kind != Wire.Text && frame.Kind != Wire.Image)) continue;
+                string key = Key(frame.Id);
+                if (deleted.Contains(key) || entries.ContainsKey(key)) { File.Delete(path); continue; }
+                entries.Add(key, Describe(path, key, frame));
             }
             catch (IOException) { }
         }
+        foreach (var group in entries.Values.Where(e => e.Kind == Wire.Text).GroupBy(e => e.Text).ToArray())
+            foreach (var old in group.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).Skip(1)) Delete(old.Key);
         Trim();
+    }
+
+    internal static string Key(byte[] id) { return BitConverter.ToString(id).Replace("-", "").ToLowerInvariant(); }
+
+    private static string Order(string key)
+    {
+        long stamp = Convert.ToInt64(key.Substring(0, 12), 16);
+        return (stamp >= 1577836800000L && stamp <= 4102444800000L ? "1" : "0") + key;
     }
 
     internal static Frame Read(string path)
@@ -36,47 +53,103 @@ internal sealed class ClipHistory
         using (var stream = File.OpenRead(path)) return Wire.Read(stream);
     }
 
-    internal bool Add(Frame frame)
+    internal Frame[] Apply(Frame frame, bool local)
     {
         lock (entries)
         {
-            if (frame.Kind == Wire.Image && !SaveImages) return false;
-            string path = System.IO.Path.Combine(directory, DateTime.UtcNow.Ticks.ToString("D19") +
-                "-" + Guid.NewGuid().ToString("N") + ".clip");
-            using (var stream = File.Create(path + ".tmp")) Wire.Write(stream, frame);
-            File.Move(path + ".tmp", path);
-            entries.Insert(0, Describe(path, frame));
-            Trim();
-            return true;
+            string key = Key(frame.Id);
+            if (frame.Kind == Wire.Delete)
+                return Delete(key) ? new[] { frame } : new Frame[0];
+            if (deleted.Contains(key) || entries.ContainsKey(key) ||
+                (frame.Kind == Wire.Image && local && !SaveImages)) return new Frame[0];
+
+            string path = Path.Combine(directory, key + ".clip");
+            var entry = Describe(path, key, frame);
+            var changes = new List<Frame>();
+            var duplicate = frame.Kind == Wire.Text
+                ? entries.Values.FirstOrDefault(e => e.Kind == Wire.Text && e.Text == entry.Text) : null;
+            if (duplicate != null && String.CompareOrdinal(Order(duplicate.Key), Order(key)) > 0)
+            {
+                if (Delete(key)) changes.Add(Tombstone(key));
+                return changes.ToArray();
+            }
+
+            string pending = path + ".tmp";
+            try
+            {
+                using (var stream = File.Create(pending)) Wire.Write(stream, frame);
+                File.Move(pending, path);
+            }
+            finally { File.Delete(pending); }
+            entries.Add(key, entry);
+            changes.Add(new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data));
+            if (duplicate != null && Delete(duplicate.Key)) changes.Add(Tombstone(duplicate.Key));
+            changes.AddRange(Trim());
+            return changes.ToArray();
         }
     }
 
     internal Entry[] Search(string query)
     {
         lock (entries)
-            return entries.Where(entry => entry.Text.IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
+            return entries.Values.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal)
+                .Where(e => e.Text.IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
     }
 
-    private static Entry Describe(string path, Frame frame)
+    internal IEnumerable<Frame> Replay()
     {
-        if (frame == null || (frame.Kind != Wire.Text && frame.Kind != Wire.Image)) return null;
+        string[] tombstones;
+        Entry[] snapshot;
+        lock (entries) { tombstones = deleted.ToArray(); snapshot = Search(""); }
+        foreach (string key in tombstones) yield return Tombstone(key);
+        foreach (Entry entry in snapshot)
+        {
+            Frame frame;
+            lock (entries) frame = entries.ContainsKey(entry.Key) ? Read(entry.Path) : null;
+            if (frame != null) yield return new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data);
+        }
+    }
+
+    internal static Frame Tombstone(string key)
+    {
+        var id = new byte[Wire.IdSize];
+        for (int i = 0; i < id.Length; i++) id[i] = Convert.ToByte(key.Substring(i * 2, 2), 16);
+        return new Frame(Wire.Delete, id, new byte[0]);
+    }
+
+    private bool Delete(string key)
+    {
+        if (deleted.Contains(key)) return false;
+        using (File.Create(Path.Combine(directory, key + ".deleted"))) { }
+        deleted.Add(key);
+        Entry entry;
+        if (entries.TryGetValue(key, out entry))
+        {
+            entries.Remove(key);
+            try { File.Delete(entry.Path); } catch (IOException) { }
+        }
+        return true;
+    }
+
+    private static Entry Describe(string path, string key, Frame frame)
+    {
         string text = frame.Kind == Wire.Text ? Encoding.UTF8.GetString(frame.Data) : "图片";
         string label = text.Replace('\r', ' ').Replace('\n', ' ');
         if (label.Length > 160) label = label.Substring(0, 160) + "…";
-        return new Entry { Path = path, Text = text, Label = label };
+        return new Entry { Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind };
     }
 
-    private void Trim()
+    private IEnumerable<Frame> Trim()
     {
         long bytes = 0;
-        for (int i = 0; i < entries.Count;)
+        int count = 0;
+        var changes = new List<Frame>();
+        foreach (Entry entry in entries.Values.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).ToArray())
         {
-            var file = new FileInfo(entries[i].Path);
-            bytes += file.Exists ? file.Length : 0;
-            if (i < 100 && bytes <= 64L * 1024 * 1024) { i++; continue; }
-            try { file.Delete(); }
-            catch (IOException) { }
-            entries.RemoveAt(i);
+            bytes += new FileInfo(entry.Path).Length;
+            if (++count <= 100 && bytes <= 64L * 1024 * 1024) continue;
+            if (Delete(entry.Key)) changes.Add(Tombstone(entry.Key));
         }
+        return changes;
     }
 }

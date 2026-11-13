@@ -3,11 +3,14 @@ package clip;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.ArrayDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 final class SyncClient implements Closeable {
+    interface Sender { void send(Wire.Frame frame) throws IOException; }
+    interface Replay { void send(Sender sender) throws IOException; }
     interface Receiver { void apply(Wire.Frame frame) throws IOException; }
 
     private final String host;
@@ -21,6 +24,19 @@ final class SyncClient implements Closeable {
     private boolean closed, writing;
     private TlsLink link;
     private Wire.Frame pending, sent;
+    private final ArrayDeque<Wire.Frame> history = new ArrayDeque<>();
+    private Replay replay;
+    private boolean replayNeeded;
+
+    void replayWith(Replay replay) { this.replay = replay; }
+
+    void publish(Wire.Frame frame) {
+        synchronized (lock) {
+            if (closed || link == null) return;
+            history.add(frame);
+            scheduleWrite();
+        }
+    }
     private byte[] lastApplied;
 
     SyncClient(String host, int port, byte[] pin, byte[] key, Receiver receiver, Consumer<Boolean> status) {
@@ -50,6 +66,7 @@ final class SyncClient implements Closeable {
                     if (closed) return;
                     link = current;
                     sent = null;
+                    replayNeeded = replay != null;
                     scheduleWrite();
                 }
                 connected = true;
@@ -61,19 +78,19 @@ final class SyncClient implements Closeable {
                             if (pending != null && Arrays.equals(pending.id, frame.id)) pending = null;
                         }
                     } else {
-                        if (frame.kind != Wire.TEXT && frame.kind != Wire.IMAGE)
+                        if (frame.kind < Wire.TEXT || frame.kind > Wire.DELETE)
                             throw new IOException("Unexpected message");
-                        if (!Arrays.equals(lastApplied, frame.id)) {
+                        if (frame.kind >= Wire.HISTORY_TEXT || !Arrays.equals(lastApplied, frame.id)) {
                             receiver.apply(frame);
-                            lastApplied = frame.id;
+                            if (frame.kind < Wire.HISTORY_TEXT) lastApplied = frame.id;
                         }
-                        current.send(new Wire.Frame(Wire.ACK, frame.id, new byte[0]));
+                        if (frame.kind < Wire.HISTORY_TEXT) current.send(new Wire.Frame(Wire.ACK, frame.id, new byte[0]));
                     }
                 }
             } catch (IOException | RuntimeException ignored) {
                 // Pending data remains available for the next connection.
             } finally {
-                synchronized (lock) { link = null; }
+                synchronized (lock) { link = null; history.clear(); }
                 if (connected && !isClosed()) status.accept(false);
             }
             try { Thread.sleep(850); }
@@ -87,7 +104,7 @@ final class SyncClient implements Closeable {
 
     // Must be called while holding lock.
     private void scheduleWrite() {
-        if (closed || writing || link == null || pending == null || pending == sent) return;
+        if (closed || writing || link == null || (history.isEmpty() && !replayNeeded && (pending == null || pending == sent))) return;
         writing = true;
         writer.execute(this::writeLatest);
     }
@@ -95,17 +112,22 @@ final class SyncClient implements Closeable {
     private void writeLatest() {
         for (;;) {
             TlsLink current;
-            Wire.Frame frame;
+            Wire.Frame frame = null;
+            boolean restore = false;
             synchronized (lock) {
                 current = link;
-                frame = pending;
-                if (closed || current == null || frame == null || frame == sent) {
+                if (closed || current == null || (history.isEmpty() && !replayNeeded && (pending == null || pending == sent))) {
                     writing = false;
                     return;
                 }
-                sent = frame;
+                if (pending != null && pending != sent) { frame = pending; sent = frame; }
+                else if (replayNeeded) { restore = true; replayNeeded = false; }
+                else frame = history.remove();
             }
-            try { current.send(frame); }
+            try {
+                if (restore) replay.send(current::send);
+                else current.send(frame);
+            }
             catch (IOException failed) {
                 closeLink(current);
                 synchronized (lock) {

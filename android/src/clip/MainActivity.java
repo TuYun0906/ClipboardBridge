@@ -1,6 +1,7 @@
 package clip;
 
 import android.app.Activity;
+import android.app.DatePickerDialog;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
@@ -23,6 +24,11 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
@@ -135,7 +141,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout connection = card(root, "连接");
         internet = toggle(connection, "公网模式", configuredMode);
-        host = field(configuredMode ? "电脑的 Tailscale 地址" : "电脑的局域网地址",
+        host = field(connectionHint(configuredMode),
                 prefs.getString(configuredMode ? Prefs.WAN : Prefs.LAN, ""));
         host.setSingleLine(true);
         host.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -150,7 +156,7 @@ public final class MainActivity extends Activity {
                     .putString(Prefs.PAIR, pair.getText().toString().trim())
                     .putBoolean(Prefs.INTERNET, enabled).apply();
             configuredMode = enabled;
-            host.setHint(enabled ? "电脑的 Tailscale 地址" : "电脑的局域网地址");
+            host.setHint(connectionHint(enabled));
             host.setText(prefs.getString(enabled ? Prefs.WAN : Prefs.LAN, ""));
         });
 
@@ -193,11 +199,16 @@ public final class MainActivity extends Activity {
     }
 
     private void saveConnection() {
+        String address = host.getText().toString().trim();
+        if (!address.isEmpty() && Endpoint.parse(address, Prefs.PORT) == null) {
+            host.setError("填写 IP 或域名，可加端口，例如 example.com:50001");
+            return;
+        }
         getSystemService(android.view.inputmethod.InputMethodManager.class)
                 .hideSoftInputFromWindow(host.getWindowToken(), 0);
         host.clearFocus();
         pair.clearFocus();
-        prefs.edit().putString(configuredMode ? Prefs.WAN : Prefs.LAN, host.getText().toString().trim())
+        prefs.edit().putString(configuredMode ? Prefs.WAN : Prefs.LAN, address)
                 .putString(Prefs.PAIR, pair.getText().toString().trim()).apply();
         if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
@@ -205,6 +216,10 @@ public final class MainActivity extends Activity {
             prefs.edit().putBoolean("askedNotice", true).apply();
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, NOTICE);
         }
+    }
+
+    private static String connectionHint(boolean publicMode) {
+        return publicMode ? "Tailscale 地址或映射地址:端口" : "电脑的局域网地址";
     }
 
     private void enableMedia(boolean enabled) {
@@ -280,6 +295,7 @@ public final class MainActivity extends Activity {
         helpSection(body, "Shizuku 后台同步", "安装 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可在 Shizuku 里使用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         helpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         helpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络，并都开启公网模式。把 Windows 设置中显示的 Tailscale 地址和原配对码填到安卓端，再保存连接。");
+        helpSection(body, "内网映射连接", "在电脑关闭 Tailscale 模式，用映射工具把公网 TCP 端口转发到电脑设置中显示的局域网地址和端口 47832。安卓开启公网模式，填入映射的公网 IP 或域名及端口，再用原配对码保存。");
         helpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
         LinearLayout panel = dialogBody("如何上手");
         add(panel, scroll, 0, Math.min(dp(360), getResources().getDisplayMetrics().heightPixels / 2));
@@ -312,6 +328,11 @@ public final class MainActivity extends Activity {
         query.setBackground(Style.surface(this, Style.WHITE, 12));
         query.setSingleLine(true);
         add(body, query, 0, dp(46));
+        LinearLayout dates = new LinearLayout(this);
+        add(body, dates, 8, dp(44));
+        LocalDate[] bounds = new LocalDate[2];
+        ZoneId zone = ZoneId.systemDefault();
+        DateTimeFormatter timestamp = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss", java.util.Locale.ROOT);
         ScrollView scroll = new ScrollView(this);
         LinearLayout rows = Style.column(this);
         scroll.addView(rows);
@@ -322,6 +343,10 @@ public final class MainActivity extends Activity {
             rows.removeAllViews();
             for (ClipHistory.Entry entry : entries) {
                 if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(search)) continue;
+                ZonedDateTime copied = entry.copiedAt == 0 ? null : Instant.ofEpochMilli(entry.copiedAt).atZone(zone);
+                LocalDate date = copied == null ? null : copied.toLocalDate();
+                if ((bounds[0] != null && (date == null || date.isBefore(bounds[0]))) ||
+                        (bounds[1] != null && (date == null || date.isAfter(bounds[1])))) continue;
                 LinearLayout card = Style.column(this);
                 card.setBackground(Style.surface(this, Style.WHITE, 14));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
@@ -333,6 +358,8 @@ public final class MainActivity extends Activity {
                     add(card, label, 0, -2);
                     card.setOnClickListener(view -> previewHistoryText(service, entry));
                 }
+                add(card, Style.label(this, copied == null ? "复制时间未知" : timestamp.format(copied),
+                        12, Style.MUTED, false), 5, -2);
                 LinearLayout actions = new LinearLayout(this);
                 equal(actions, Style.action(this, "复制", false, () -> service.copyHistory(entry)));
                 equal(actions, Style.action(this, "删除", false, () -> confirmHistoryDelete(service, entry)));
@@ -345,6 +372,21 @@ public final class MainActivity extends Activity {
                 add(rows, empty, 12, dp(68));
             }
         };
+        TextView from = historyDateButton("开始日期", 0, bounds, zone, refresh);
+        TextView until = historyDateButton("结束日期", 1, bounds, zone, refresh);
+        equal(dates, from);
+        equal(dates, until);
+        TextView reset = Style.action(this, "清除", false, () -> {
+            bounds[0] = bounds[1] = null;
+            from.setText("开始日期");
+            until.setText("结束日期");
+            refresh.run();
+        });
+        reset.setContentDescription("清除日期筛选");
+        reset.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams resetSize = new LinearLayout.LayoutParams(dp(52), -1);
+        resetSize.leftMargin = dp(8);
+        dates.addView(reset, resetSize);
         query.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) { refresh.run(); }
@@ -361,6 +403,31 @@ public final class MainActivity extends Activity {
         });
         dialog.setOnDismissListener(ignored -> refreshHistory = null);
         refreshHistory.run();
+    }
+
+    private TextView historyDateButton(String title, int index, LocalDate[] bounds, ZoneId zone, Runnable refresh) {
+        TextView button = Style.action(this, title, false, () -> {});
+        button.setPadding(dp(4), 0, dp(4), 0);
+        button.setSingleLine(true);
+        button.setOnClickListener(view -> {
+            LocalDate other = bounds[1 - index];
+            LocalDate selected = bounds[index];
+            if (selected == null) selected = other == null ? LocalDate.now(zone) : other;
+            DatePickerDialog picker = new DatePickerDialog(this, (widget, year, month, day) -> {
+                LocalDate date = LocalDate.of(year, month + 1, day);
+                bounds[index] = date;
+                button.setText(date.toString());
+                refresh.run();
+            }, selected.getYear(), selected.getMonthValue() - 1, selected.getDayOfMonth());
+            picker.setTitle(title);
+            if (other != null) {
+                long limit = other.atStartOfDay(zone).toInstant().toEpochMilli();
+                if (index == 0) picker.getDatePicker().setMaxDate(limit);
+                else picker.getDatePicker().setMinDate(limit);
+            }
+            picker.show();
+        });
+        return button;
     }
 
     private LinearLayout dialogBody(String title) {

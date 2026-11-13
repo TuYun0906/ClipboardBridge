@@ -49,8 +49,26 @@ internal static class WindowsAppCheck
                 }
             }
             Console.WriteLine("PASS: both history actions fit on short and long rows at minimum window size");
+            var dates = Descendants<DatePicker>(window).ToArray();
+            var today = DateTime.Now.Date;
+            dates[0].SelectedDate = today;
+            dates[1].SelectedDate = today;
+            if (list.Items.OfType<ListBoxItem>().Count() != 3 ||
+                list.Items.OfType<ListBoxItem>().Any(item => !((Panel)item.Content).Children.OfType<StackPanel>().Single()
+                    .Children.OfType<TextBlock>().Any(label => label.Text.StartsWith(
+                        today.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)))))
+                throw new Exception("The selected date must show timestamps on all matching history rows");
+            dates[0].SelectedDate = null;
+            dates[1].SelectedDate = today.AddDays(-1);
+            if (list.Items.OfType<ListBoxItem>().Any()) throw new Exception("Out-of-range history still visible");
+            Descendants<Button>(window).Single(button => Equals(button.Content, "清除日期"))
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (dates.Any(picker => picker.SelectedDate.HasValue) || list.Items.OfType<ListBoxItem>().Count() != 3)
+                throw new Exception("Clearing dates did not restore history rows");
+            Console.WriteLine("PASS: history timestamps, date picker and clear action");
             var textRow = list.Items.Cast<ListBoxItem>().Single(item => ((Panel)item.Content)
-                .Children.OfType<TextBlock>().Any(label => label.Text.StartsWith("长")));
+                .Children.OfType<StackPanel>().Single().Children.OfType<TextBlock>()
+                .Any(label => label.Text.StartsWith("长")));
             var textWindow = OpenPreview(app, window, textRow);
             var text = Find<TextBox>(textWindow);
             if (text.Text != longText || text.IsReadOnly) throw new Exception("Editable full text preview missing");
@@ -123,5 +141,12 @@ internal static class WindowsAppCheck
             if (match != null) return match;
         }
         return null;
+    }
+
+    private static System.Collections.Generic.IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        if (root is T) yield return (T)root;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (var child in Descendants<T>(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
 }

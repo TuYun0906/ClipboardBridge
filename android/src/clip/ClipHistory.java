@@ -41,6 +41,10 @@ final class ClipHistory {
     }
 
     synchronized List<Wire.Frame> apply(Wire.Frame frame, boolean local) throws IOException {
+        return apply(frame, local, true);
+    }
+
+    private List<Wire.Frame> apply(Wire.Frame frame, boolean local, boolean trimAfter) throws IOException {
         String key = key(frame.id);
         List<Wire.Frame> changes = new ArrayList<>();
         if (frame.kind == Wire.DELETE) {
@@ -70,7 +74,7 @@ final class ClipHistory {
         records.put(key, incoming);
         changes.add(asHistory(frame));
         if (duplicate != null && delete(duplicate.key)) changes.add(tombstone(duplicate.key));
-        trim(changes);
+        if (trimAfter) trim(changes);
         return changes;
     }
 
@@ -79,8 +83,15 @@ final class ClipHistory {
         if (previous == null || previous.kind != Wire.TEXT ||
                 previous.text.equals(new String(replacement.data, StandardCharsets.UTF_8)))
             return Collections.emptyList();
-        List<Wire.Frame> changes = apply(replacement, true);
-        if (delete(key)) changes.add(tombstone(key));
+        Wire.Frame removal = tombstone(key);
+        byte[] id = replacement.id.clone();
+        System.arraycopy(removal.id, 0, id, 0, 6);
+        String replacementKey = key(id);
+        if (deleted.contains(replacementKey) || records.containsKey(replacementKey))
+            throw new IOException("Duplicate history ID");
+        List<Wire.Frame> changes = apply(new Wire.Frame(Wire.TEXT, id, replacement.data), true, false);
+        if (delete(key)) changes.add(0, removal);
+        trim(changes);
         return changes;
     }
 
@@ -149,8 +160,12 @@ final class ClipHistory {
     }
 
     private static String order(String key) {
+        return (copyTime(key) != 0 ? "1" : "0") + key;
+    }
+
+    private static long copyTime(String key) {
         long time = Long.parseLong(key.substring(0, 12), 16);
-        return (time >= 1577836800000L && time <= 4102444800000L ? "1" : "0") + key;
+        return time >= 1577836800000L && time <= 4102444800000L ? time : 0;
     }
 
     static Wire.Frame tombstone(String key) {
@@ -167,10 +182,12 @@ final class ClipHistory {
         final File file;
         final String key, text;
         final int kind;
+        final long copiedAt;
         Entry(File file, String key, Wire.Frame frame) {
             this.file = file;
             this.key = key;
             kind = frame.kind;
+            copiedAt = copyTime(key);
             text = kind == Wire.TEXT ? new String(frame.data, StandardCharsets.UTF_8) : "图片";
         }
     }

@@ -7,7 +7,7 @@ $windows = 'tests/HistorySyncServerCheck.cs', 'windows/SyncServer.cs', 'windows/
     ForEach-Object { (Resolve-Path (Join-Path $root $_)).Path }
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /codepage:65001 "/out:$exe" /r:System.Security.dll $windows
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-$android = 'tests/HistorySyncPeersCheck.java', 'android/src/clip/TlsLink.java', 'android/src/clip/Wire.java',
+$android = 'tests/HistorySyncPeersCheck.java', 'android/src/clip/Endpoint.java', 'android/src/clip/TlsLink.java', 'android/src/clip/Wire.java',
     'android/src/clip/SyncClient.java' | ForEach-Object { (Resolve-Path (Join-Path $root $_)).Path }
 javac --release 17 -encoding UTF-8 -d $build.FullName $android
 if ($LASTEXITCODE) { exit $LASTEXITCODE }

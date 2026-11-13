@@ -199,23 +199,25 @@ public final class SyncService extends Service {
 
     private void applySettings() {
         boolean publicMode = prefs.getBoolean(Prefs.INTERNET, false);
-        String host = prefs.getString(publicMode ? Prefs.WAN : Prefs.LAN, "").trim();
+        String address = prefs.getString(publicMode ? Prefs.WAN : Prefs.LAN, "").trim();
         String code = prefs.getString(Prefs.PAIR, "").trim();
-        if (!host.equals(endpoint) || !code.equals(token) || publicMode != internet) {
+        if (!address.equals(endpoint) || !code.equals(token) || publicMode != internet) {
             if (client != null) client.close();
             client = null;
-            endpoint = host;
+            endpoint = address;
             token = code;
             internet = publicMode;
             byte[] pairing = parsePairing(code);
-            if (host.isEmpty()) setStatus("请填写电脑地址");
+            Endpoint target = Endpoint.parse(address, Prefs.PORT);
+            if (address.isEmpty()) setStatus("请填写电脑地址");
+            else if (target == null) setStatus("地址格式有误，请填写 IP 或域名，可加端口");
             else if (pairing == null) setStatus("请填写有效的配对码");
             else {
                 byte[] pin = Arrays.copyOfRange(pairing, 0, 32);
                 byte[] key = Arrays.copyOfRange(pairing, 32, 64);
                 final Object connection = new Object();
                 currentConnection = connection;
-                client = new SyncClient(host, Prefs.PORT, pin, key, frame -> {
+                client = new SyncClient(target.host, target.port, pin, key, frame -> {
                     if (frame.kind >= Wire.HISTORY_TEXT) {
                         Wire.Frame entry = frame;
                         if (frame.kind != Wire.DELETE)

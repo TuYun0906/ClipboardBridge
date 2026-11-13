@@ -10,6 +10,7 @@ internal sealed class ClipHistory
     {
         internal string Path, Label, Text, Key;
         internal byte Kind;
+        internal DateTime? CopyTime;
     }
 
     private readonly string directory;
@@ -42,11 +43,13 @@ internal sealed class ClipHistory
 
     internal static string Key(byte[] id) { return BitConverter.ToString(id).Replace("-", "").ToLowerInvariant(); }
 
-    private static string Order(string key)
+    private static long? CopyTimestamp(string key)
     {
         long stamp = Convert.ToInt64(key.Substring(0, 12), 16);
-        return (stamp >= 1577836800000L && stamp <= 4102444800000L ? "1" : "0") + key;
+        return stamp >= 1577836800000L && stamp <= 4102444800000L ? (long?)stamp : null;
     }
+
+    private static string Order(string key) { return (CopyTimestamp(key).HasValue ? "1" : "0") + key; }
 
     internal static Frame Read(string path)
     {
@@ -54,6 +57,11 @@ internal sealed class ClipHistory
     }
 
     internal Frame[] Apply(Frame frame, bool local)
+    {
+        return Apply(frame, local, true);
+    }
+
+    private Frame[] Apply(Frame frame, bool local, bool trimAfter)
     {
         lock (entries)
         {
@@ -84,7 +92,7 @@ internal sealed class ClipHistory
             entries.Add(key, entry);
             changes.Add(new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data));
             if (duplicate != null && Delete(duplicate.Key)) changes.Add(Tombstone(duplicate.Key));
-            changes.AddRange(Trim());
+            if (trimAfter) changes.AddRange(Trim());
             return changes.ToArray();
         }
     }
@@ -96,17 +104,27 @@ internal sealed class ClipHistory
             Entry previous;
             if (!entries.TryGetValue(key, out previous) || previous.Kind != Wire.Text ||
                 previous.Text == Encoding.UTF8.GetString(replacement.Data)) return new Frame[0];
-            var changes = new List<Frame>(Apply(replacement, true));
-            if (Delete(key)) changes.Add(Tombstone(key));
+            Frame removal = Tombstone(key);
+            byte[] id = (byte[])replacement.Id.Clone();
+            Array.Copy(removal.Id, id, 6);
+            string editedKey = Key(id);
+            if (entries.ContainsKey(editedKey) || deleted.Contains(editedKey)) throw new IOException("无法生成编辑记录");
+            var edited = new Frame(Wire.Text, id, replacement.Data);
+            var changes = new List<Frame>(Apply(edited, true, false));
+            if (Delete(key)) changes.Insert(0, removal);
+            changes.AddRange(Trim());
             return changes.ToArray();
         }
     }
 
-    internal Entry[] Search(string query)
+    internal Entry[] Search(string query, DateTime? from = null, DateTime? through = null)
     {
+        string term = query.Trim();
         lock (entries)
             return entries.Values.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal)
-                .Where(e => e.Text.IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
+                .Where(e => (!from.HasValue || e.CopyTime >= from.Value.Date) &&
+                    (!through.HasValue || e.CopyTime.HasValue && e.CopyTime.Value.Date <= through.Value.Date) &&
+                    e.Text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
     }
 
     internal IEnumerable<Frame> Replay()
@@ -149,7 +167,12 @@ internal sealed class ClipHistory
         string text = frame.Kind == Wire.Text ? Encoding.UTF8.GetString(frame.Data) : "图片";
         string label = text.Replace('\r', ' ').Replace('\n', ' ');
         if (label.Length > 160) label = label.Substring(0, 160) + "…";
-        return new Entry { Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind };
+        long? stamp = CopyTimestamp(key);
+        return new Entry
+        {
+            Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind,
+            CopyTime = stamp.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(stamp.Value).LocalDateTime : (DateTime?)null
+        };
     }
 
     private IEnumerable<Frame> Trim()

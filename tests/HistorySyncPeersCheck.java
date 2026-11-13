@@ -67,6 +67,16 @@ final class HistorySyncPeersCheck {
     }
 
     public static void main(String[] args) throws Exception {
+        Endpoint mapped = Endpoint.parse("clip.example.com:50001", 47832);
+        Endpoint direct = Endpoint.parse("100.64.1.2", 47832);
+        Endpoint ipv6 = Endpoint.parse("[2001:db8::1]:443", 47832);
+        if (mapped == null || !mapped.host.equals("clip.example.com") || mapped.port != 50001 ||
+                direct == null || direct.port != 47832 || ipv6 == null || ipv6.port != 443)
+            throw new AssertionError("Valid clipboard endpoint rejected");
+        for (String invalid : new String[] {"", "clip.example.com:", "clip.example.com:0",
+                "clip.example.com:65536", "https://clip.example.com", "clip.example.com/path", "user@clip.example.com"})
+            if (Endpoint.parse(invalid, 47832) != null)
+                throw new AssertionError("Invalid clipboard endpoint accepted: " + invalid);
         int port = Integer.parseInt(args[0]);
         byte[] pairing = Base64.getUrlDecoder().decode(args[1]);
         try (Peer editor = new Peer(port, pairing)) {

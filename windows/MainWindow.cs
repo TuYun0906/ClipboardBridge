@@ -50,8 +50,8 @@ internal sealed class MainWindow : Window
     private Border Panel()
     {
         var body = new Grid { Margin = new Thickness(22) };
-        for (int i = 0; i < 4; i++) body.RowDefinitions.Add(new RowDefinition {
-            Height = i == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto
+        for (int i = 0; i < 5; i++) body.RowDefinitions.Add(new RowDefinition {
+            Height = i == 4 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto
         });
         status = Label("", 14, Muted, false);
         var statusRow = new DockPanel();
@@ -84,16 +84,41 @@ internal sealed class MainWindow : Window
         Grid.SetRow(searchRow, 2);
         body.Children.Add(searchRow);
 
+        var dates = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+        dates.ColumnDefinitions.Add(new ColumnDefinition());
+        dates.ColumnDefinitions.Add(new ColumnDefinition());
+        dates.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var from = HistoryDatePicker("开始日期");
+        var through = HistoryDatePicker("结束日期");
+        AddAction(dates, 0, HistoryDateField("开始日期", from));
+        AddAction(dates, 1, HistoryDateField("结束日期", through));
+        var clearDates = Action("清除日期", false, () =>
+        {
+            from.SelectedDate = through.SelectedDate = null;
+            from.Text = through.Text = "";
+        });
+        clearDates.Width = 76;
+        clearDates.Height = 32;
+        clearDates.VerticalAlignment = VerticalAlignment.Bottom;
+        AddAction(dates, 2, clearDates);
+        Grid.SetRow(dates, 3);
+        body.Children.Add(dates);
+
         var items = new ListBox { BorderBrush = BorderColor };
         ScrollViewer.SetHorizontalScrollBarVisibility(items, ScrollBarVisibility.Disabled);
-        Grid.SetRow(items, 3);
+        Grid.SetRow(items, 4);
         body.Children.Add(items);
         Action refresh = () =>
         {
             items.Items.Clear();
-            foreach (var entry in program.History.Search(search.Text))
+            if (from.SelectedDate > through.SelectedDate)
             {
-                var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 36 };
+                items.Items.Add(Label("结束日期须在开始日期当天或之后", 14, Muted, false));
+                return;
+            }
+            foreach (var entry in program.History.Search(search.Text, from.SelectedDate, through.SelectedDate))
+            {
+                var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 48 };
                 var copy = Action("复制", false, () => program.CopyHistory(entry.Path));
                 copy.Width = 62;
                 var delete = Action("删除", false, () => program.DeleteHistory(entry.Key));
@@ -103,19 +128,22 @@ internal sealed class MainWindow : Window
                 row.Children.Add(delete);
                 DockPanel.SetDock(copy, Dock.Right);
                 row.Children.Add(copy);
+                var details = new StackPanel { Margin = new Thickness(5, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Center };
                 if (entry.Kind == Wire.Image)
                 {
-                    row.Height = 68;
+                    row.Height = 82;
                     copy.Height = delete.Height = 36;
-                    AddHistoryImage(row, entry.Path);
+                    AddHistoryImage(details, entry.Path);
                 }
-                else
-                {
-                    var text = Label(entry.Label, 14, Ink, false);
-                    text.Margin = new Thickness(5, 0, 10, 0);
-                    text.VerticalAlignment = VerticalAlignment.Center;
-                    row.Children.Add(text);
-                }
+                else details.Children.Add(Label(entry.Label, 14, Ink, false));
+                string timestamp = entry.CopyTime.HasValue
+                    ? entry.CopyTime.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                    : "复制时间未知";
+                var time = Label(timestamp, 12, Muted, false);
+                time.Margin = new Thickness(0, 3, 0, 0);
+                details.Children.Add(time);
+                row.Children.Add(details);
                 var item = new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch };
                 item.ToolTip = "双击预览";
                 item.MouseDoubleClick += (sender, args) =>
@@ -129,10 +157,27 @@ internal sealed class MainWindow : Window
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
         };
         search.TextChanged += (sender, args) => refresh();
+        from.SelectedDateChanged += (sender, args) => refresh();
+        through.SelectedDateChanged += (sender, args) => refresh();
         program.HistoryChanged += refresh;
         IsVisibleChanged += (sender, args) => { if (IsVisible) refresh(); };
         refresh();
         return new Border { Background = BackgroundColor, Child = body };
+    }
+
+    private static DatePicker HistoryDatePicker(string label)
+    {
+        var picker = new DatePicker { Height = 32 };
+        System.Windows.Automation.AutomationProperties.SetName(picker, label);
+        return picker;
+    }
+
+    private static StackPanel HistoryDateField(string label, DatePicker picker)
+    {
+        var field = new StackPanel();
+        field.Children.Add(Label(label, 12, Muted, false));
+        field.Children.Add(picker);
+        return field;
     }
 
     private void OpenHelp()
@@ -145,6 +190,7 @@ internal sealed class MainWindow : Window
         AddHelpSection(body, "Android 后台同步", "先安装并启动 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         AddHelpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         AddHelpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络。在电脑开启公网模式并保存，记下显示的 Tailscale 地址。安卓端也切到公网模式，填写这个地址和原来的配对码，再保存连接。");
+        AddHelpSection(body, "内网映射连接", "电脑关闭 Tailscale 模式。用映射工具将公网 TCP 端口转发至设置显示的局域网地址和端口 47832。安卓开启公网模式，填写映射的公网地址和端口，再用原配对码保存。");
         AddHelpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
         var shell = new DockPanel { Background = BackgroundColor, Margin = new Thickness(0) };
         var close = Action("关闭", false, dialog.Close);
@@ -179,13 +225,13 @@ internal sealed class MainWindow : Window
         body.Children.Add(link);
     }
 
-    private void AddHistoryImage(DockPanel row, string path)
+    private void AddHistoryImage(Panel row, string path)
     {
         var image = new Image { Stretch = Stretch.Uniform };
         var thumbnail = new Border
         {
             Child = image, Background = Tint, CornerRadius = new CornerRadius(8),
-            Width = 104, Margin = new Thickness(0, 0, 8, 0), HorizontalAlignment = HorizontalAlignment.Left
+            Width = 104, Height = 55, HorizontalAlignment = HorizontalAlignment.Left
         };
         row.Children.Add(thumbnail);
         thumbnail.Loaded += async (sender, args) =>
@@ -337,7 +383,7 @@ internal sealed class MainWindow : Window
         dialog.Closed += (sender, args) => settings = null;
         var body = DialogBody();
         body.Children.Add(Label("连接", 20, Ink, true));
-        var publicMode = Check("公网模式（Tailscale）", program.PublicMode);
+        var publicMode = Check("使用 Tailscale 监听", program.PublicMode);
         body.Children.Add(publicMode);
         var address = new TextBox
         {
@@ -445,11 +491,11 @@ internal sealed class MainWindow : Window
         };
     }
 
-    private static void AddAction(Grid grid, int column, Button button)
+    private static void AddAction(Grid grid, int column, FrameworkElement control)
     {
-        if (column != 0) button.Margin = new Thickness(7, 0, 0, 0);
-        Grid.SetColumn(button, column);
-        grid.Children.Add(button);
+        if (column != 0) control.Margin = new Thickness(7, 0, 0, 0);
+        Grid.SetColumn(control, column);
+        grid.Children.Add(control);
     }
 
     private static TextBlock Label(string text, double size, Brush foreground, bool strong)

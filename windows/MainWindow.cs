@@ -52,7 +52,14 @@ internal sealed class MainWindow : Window
             Height = i == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto
         });
         status = Label("", 14, Muted, false);
-        body.Children.Add(status);
+        var statusRow = new DockPanel();
+        var help = new Button { Content = "如何上手", Foreground = Blue, Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0), Padding = new Thickness(8, 0, 0, 0), Cursor = Cursors.Hand };
+        help.Click += (sender, args) => OpenHelp();
+        DockPanel.SetDock(help, Dock.Right);
+        statusRow.Children.Add(help);
+        statusRow.Children.Add(status);
+        body.Children.Add(statusRow);
         RefreshStatus();
 
         var actions = new Grid { Height = 42, Margin = new Thickness(0, 12, 0, 16) };
@@ -94,6 +101,14 @@ internal sealed class MainWindow : Window
                 row.Children.Add(delete);
                 DockPanel.SetDock(copy, Dock.Right);
                 row.Children.Add(copy);
+                if (entry.Kind == Wire.Image)
+                {
+                    var preview = Action("预览", false, () => PreviewHistory(entry.Path));
+                    preview.Width = 62;
+                    preview.Margin = new Thickness(0, 0, 6, 0);
+                    DockPanel.SetDock(preview, Dock.Right);
+                    row.Children.Add(preview);
+                }
                 var text = Label(entry.Label, 14, Ink, false);
                 text.Margin = new Thickness(5, 0, 10, 0);
                 text.VerticalAlignment = VerticalAlignment.Center;
@@ -107,6 +122,63 @@ internal sealed class MainWindow : Window
         IsVisibleChanged += (sender, args) => { if (IsVisible) refresh(); };
         refresh();
         return new Border { Background = BackgroundColor, Child = body };
+    }
+
+    private void OpenHelp()
+    {
+        var dialog = Dialog("如何上手", 440);
+        dialog.SizeToContent = SizeToContent.Manual;
+        dialog.Height = Math.Min(580, SystemParameters.WorkArea.Height - 40);
+        var body = DialogBody();
+        AddHelpSection(body, "局域网配对", "让电脑和安卓设备连接同一个局域网。在电脑「设置」查看地址并复制配对码，再到安卓端填写地址和配对码，点「保存连接」。");
+        AddHelpSection(body, "Android 后台同步", "先安装并启动 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
+        AddHelpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
+        AddHelpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络。在电脑开启公网模式并保存，记下显示的 Tailscale 地址。安卓端也切到公网模式，填写这个地址和原来的配对码，再保存连接。");
+        AddHelpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
+        dialog.Content = new ScrollViewer { Content = body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        dialog.ShowDialog();
+    }
+
+    private static void AddHelpSection(StackPanel body, string title, string instructions)
+    {
+        var heading = Label(title, 16, Ink, true);
+        heading.Margin = new Thickness(0, 12, 0, 5);
+        body.Children.Add(heading);
+        body.Children.Add(new TextBlock { Text = instructions, TextWrapping = TextWrapping.Wrap,
+            Foreground = Muted, FontSize = 14, LineHeight = 22 });
+    }
+
+    private static void AddHelpLink(StackPanel body, string title, string url)
+    {
+        var link = Action(title, false, () =>
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (System.ComponentModel.Win32Exception) { MessageBox.Show("无法打开浏览器。", "如何上手"); }
+        });
+        link.Height = 36;
+        link.Margin = new Thickness(0, 8, 0, 0);
+        body.Children.Add(link);
+    }
+
+    private void PreviewHistory(string path)
+    {
+        try
+        {
+            var source = WindowsClipboard.ToClipboardData(ClipHistory.Read(path)).GetImage();
+            if (source == null) throw new IOException("无法读取图片");
+            var preview = new Window
+            {
+                Owner = this, Title = "图片预览", Width = 640, Height = 510,
+                MinWidth = 280, MinHeight = 230, ShowInTaskbar = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = BackgroundColor,
+                Content = new Image { Source = source, Stretch = Stretch.Uniform, Margin = new Thickness(16) }
+            };
+            preview.ShowDialog();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "无法预览图片");
+        }
     }
 
     internal void OpenSettings()

@@ -106,6 +106,26 @@ public final class SyncService extends Service {
         });
     }
 
+    void loadHistoryImage(ClipHistory.Entry entry,
+            java.util.function.Consumer<android.graphics.Bitmap> callback) {
+        worker.post(() -> {
+            android.graphics.Bitmap bitmap = null;
+            try {
+                byte[] bytes = ClipHistory.read(entry.file).data;
+                android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+                options.inJustDecodeBounds = true;
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+                options.inJustDecodeBounds = false;
+                options.inSampleSize = 1;
+                while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > 1800)
+                    options.inSampleSize *= 2;
+                bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+            } catch (IOException | RuntimeException ignored) { }
+            android.graphics.Bitmap result = bitmap;
+            main.post(() -> callback.accept(result));
+        });
+    }
+
     void deleteHistory(ClipHistory.Entry entry) {
         worker.post(() -> record(ClipHistory.tombstone(entry.key), true));
     }

@@ -120,6 +120,12 @@ public final class MainActivity extends Activity {
         root.addView(title);
         status = Style.label(this, "等待连接", 14, Style.BLUE, true);
         add(root, status, 6, -2);
+        TextView help = Style.label(this, "如何上手", 13, Style.BLUE, true);
+        help.setGravity(Gravity.CENTER_VERTICAL);
+        help.setFocusable(true);
+        help.setOnClickListener(view -> showHelp());
+        LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(-2, dp(44));
+        root.addView(help, helpParams);
 
         LinearLayout sending = new LinearLayout(this);
         equal(sending, Style.action(this, "发送文字", true, this::sendText));
@@ -268,50 +274,92 @@ public final class MainActivity extends Activity {
 
     private Runnable refreshHistory;
 
+    private void showHelp() {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout body = Style.column(this);
+        body.setPadding(dp(20), dp(4), dp(20), dp(16));
+        scroll.addView(body);
+        helpSection(body, "局域网配对", "让电脑和安卓设备连接同一个局域网。在电脑「设置」查看地址并复制配对码，在安卓端填写两项并点「保存连接」。");
+        helpSection(body, "Shizuku 后台同步", "安装 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可在 Shizuku 里使用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
+        helpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
+        helpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络，并都开启公网模式。把 Windows 设置中显示的 Tailscale 地址和原配对码填到安卓端，再保存连接。");
+        helpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
+        new AlertDialog.Builder(this).setTitle("如何上手").setView(scroll)
+                .setPositiveButton("关闭", null).show();
+    }
+
+    private void helpSection(LinearLayout body, String title, String instructions) {
+        add(body, Style.label(this, title, 16, Style.INK, true), 12, -2);
+        TextView text = Style.label(this, instructions, 14, Style.MUTED, false);
+        text.setLineSpacing(dp(4), 1);
+        add(body, text, 5, -2);
+    }
+
+    private void helpLink(LinearLayout body, String title, String url) {
+        add(body, Style.action(this, title, false, () -> {
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+            catch (android.content.ActivityNotFoundException error) {
+                Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show();
+            }
+        }), 8, dp(44));
+    }
+
     private void showHistory() {
         SyncService service = SyncService.running;
         if (service == null) return;
         LinearLayout body = Style.column(this);
-        body.setPadding(dp(18), dp(10), dp(18), 0);
+        body.setPadding(dp(16), dp(15), dp(16), dp(14));
+        body.setBackground(Style.surface(this, Style.BACKGROUND, 22));
+        body.setFocusableInTouchMode(true);
         EditText query = field("搜索文字或图片", "");
+        query.setBackground(Style.surface(this, Style.WHITE, 12));
         query.setSingleLine(true);
         add(body, query, 0, dp(46));
-        android.widget.ListView list = new android.widget.ListView(this);
-        add(body, list, 8, Math.min(dp(370), getResources().getDisplayMetrics().heightPixels / 2));
-        android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(this,
-                android.R.layout.simple_list_item_1);
-        list.setAdapter(adapter);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout rows = Style.column(this);
+        scroll.addView(rows);
+        add(body, scroll, 10, Math.min(dp(410), getResources().getDisplayMetrics().heightPixels / 2));
         java.util.List<ClipHistory.Entry> entries = new java.util.ArrayList<>();
-        java.util.List<ClipHistory.Entry> matches = new java.util.ArrayList<>();
         Runnable refresh = () -> {
             String search = query.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
-            matches.clear();
-            adapter.clear();
+            rows.removeAllViews();
             for (ClipHistory.Entry entry : entries) {
                 if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(search)) continue;
-                matches.add(entry);
-                String preview = entry.text.replace('\n', ' ').replace('\r', ' ');
-                adapter.add(preview.length() > 150 ? preview.substring(0, 150) + "…" : preview);
+                LinearLayout card = Style.column(this);
+                card.setBackground(Style.surface(this, Style.WHITE, 14));
+                card.setPadding(dp(12), dp(10), dp(12), dp(8));
+                TextView label = Style.label(this, entry.text, 15, Style.INK, false);
+                label.setMaxLines(3);
+                label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                add(card, label, 0, -2);
+                LinearLayout actions = new LinearLayout(this);
+                if (entry.kind == Wire.IMAGE)
+                    equal(actions, Style.action(this, "预览", false, () -> previewHistory(service, entry)));
+                equal(actions, Style.action(this, "复制", false, () -> service.copyHistory(entry)));
+                equal(actions, Style.action(this, "删除", false, () -> new AlertDialog.Builder(this)
+                        .setTitle("删除这条记录？")
+                        .setMessage("删除会同步到其他设备。")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("删除", (dialog, which) -> service.deleteHistory(entry)).show()));
+                add(card, actions, 8, dp(44));
+                add(rows, card, rows.getChildCount() == 0 ? 0 : 8, -2);
             }
-            if (matches.isEmpty()) adapter.add("暂无匹配记录");
+            if (rows.getChildCount() == 0) {
+                TextView empty = Style.label(this, "暂无匹配记录", 14, Style.MUTED, false);
+                empty.setGravity(Gravity.CENTER);
+                add(rows, empty, 12, dp(68));
+            }
         };
         query.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) { refresh.run(); }
             @Override public void afterTextChanged(android.text.Editable value) { }
         });
-        list.setOnItemClickListener((parent, view, position, id) -> {
-            if (position >= matches.size()) return;
-            ClipHistory.Entry entry = matches.get(position);
-            new AlertDialog.Builder(this).setItems(new String[]{"复制", "删除"}, (menu, choice) -> {
-                if (choice == 0) service.copyHistory(entry);
-                else service.deleteHistory(entry);
-            }).show();
-        });
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("剪贴板历史")
                 .setView(body).setPositiveButton("关闭", null).create();
-        dialog.show();
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        dialog.show();
+        body.requestFocus();
         refreshHistory = () -> service.loadHistory(result -> {
             if (!dialog.isShowing()) return;
             entries.clear();
@@ -320,6 +368,25 @@ public final class MainActivity extends Activity {
         });
         dialog.setOnDismissListener(ignored -> refreshHistory = null);
         refreshHistory.run();
+    }
+
+    private void previewHistory(SyncService service, ClipHistory.Entry entry) {
+        service.loadHistoryImage(entry, bitmap -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (bitmap == null) {
+                Toast.makeText(this, "无法预览该图片", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            android.widget.ImageView image = new android.widget.ImageView(this);
+            image.setImageBitmap(bitmap);
+            image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            image.setContentDescription("历史图片预览");
+            LinearLayout body = Style.column(this);
+            body.setPadding(dp(12), 0, dp(12), 0);
+            add(body, image, 0, Math.min(dp(540), getResources().getDisplayMetrics().heightPixels / 2));
+            new AlertDialog.Builder(this).setTitle("图片预览").setView(body)
+                    .setPositiveButton("关闭", null).show();
+        });
     }
 
     private void refreshStatus() {

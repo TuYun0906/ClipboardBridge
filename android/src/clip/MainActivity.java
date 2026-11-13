@@ -337,10 +337,41 @@ public final class MainActivity extends Activity {
         LinearLayout rows = Style.column(this);
         scroll.addView(rows);
         add(body, scroll, 10, Math.min(dp(410), getResources().getDisplayMetrics().heightPixels / 2));
+        TextView feedback = Style.label(this, "", 13, Style.MUTED, false);
+        feedback.setGravity(Gravity.CENTER);
+        feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        feedback.setVisibility(View.GONE);
+        add(body, feedback, 6, dp(28));
+        LinearLayout selectionActions = new LinearLayout(this);
+        add(body, selectionActions, 8, dp(44));
         java.util.List<ClipHistory.Entry> entries = new java.util.ArrayList<>();
+        java.util.Set<String> selected = new java.util.HashSet<>();
+        java.util.Map<String, Runnable> previews = new java.util.HashMap<>();
+        java.util.Map<String, View> cards = new java.util.HashMap<>();
+        Runnable hideFeedback = () -> feedback.setVisibility(View.GONE);
+        TextView cancel = Style.action(this, "取消多选", false, () -> { });
+        TextView preview = Style.action(this, "预览", false, () -> {
+            if (selected.size() != 1) return;
+            Runnable open = previews.get(selected.iterator().next());
+            if (open != null) open.run();
+        });
+        TextView delete = Style.action(this, "删除", true, () ->
+                confirmHistoryDelete(service, new java.util.ArrayList<>(selected)));
+        equal(selectionActions, cancel);
+        equal(selectionActions, preview);
+        equal(selectionActions, delete);
+        Runnable updateSelection = () -> {
+            selected.retainAll(cards.keySet());
+            cards.forEach((key, card) -> card.setSelected(selected.contains(key)));
+            selectionActions.setVisibility(selected.isEmpty() ? View.GONE : View.VISIBLE);
+            delete.setText("删除 (" + selected.size() + ")");
+            preview.setVisibility(selected.size() == 1 ? View.VISIBLE : View.GONE);
+        };
         Runnable refresh = () -> {
             String search = query.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
             rows.removeAllViews();
+            previews.clear();
+            cards.clear();
             for (ClipHistory.Entry entry : entries) {
                 if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(search)) continue;
                 ZonedDateTime copied = entry.copiedAt == 0 ? null : Instant.ofEpochMilli(entry.copiedAt).atZone(zone);
@@ -348,22 +379,47 @@ public final class MainActivity extends Activity {
                 if ((bounds[0] != null && (date == null || date.isBefore(bounds[0]))) ||
                         (bounds[1] != null && (date == null || date.isAfter(bounds[1])))) continue;
                 LinearLayout card = Style.column(this);
-                card.setBackground(Style.surface(this, Style.WHITE, 14));
+                cards.put(entry.key, card);
+                card.setFocusable(true);
+                android.graphics.drawable.StateListDrawable surface = new android.graphics.drawable.StateListDrawable();
+                surface.addState(new int[]{android.R.attr.state_selected}, Style.surface(this, Style.TINT, 14));
+                surface.addState(new int[0], Style.surface(this, Style.WHITE, 14));
+                card.setBackground(new android.graphics.drawable.RippleDrawable(
+                        android.content.res.ColorStateList.valueOf(0x283368ea), surface, null));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
-                if (entry.kind == Wire.IMAGE) addHistoryImage(card, service, entry);
+                if (entry.kind == Wire.IMAGE) {
+                    card.setContentDescription("图片记录");
+                    previews.put(entry.key, addHistoryImage(card, service, entry));
+                }
                 else {
                     TextView label = Style.label(this, entry.text, 15, Style.INK, false);
                     label.setMaxLines(3);
                     label.setEllipsize(android.text.TextUtils.TruncateAt.END);
                     add(card, label, 0, -2);
-                    card.setOnClickListener(view -> previewHistoryText(service, entry));
+                    previews.put(entry.key, () -> previewHistoryText(service, entry));
                 }
                 add(card, Style.label(this, copied == null ? "复制时间未知" : timestamp.format(copied),
                         12, Style.MUTED, false), 5, -2);
-                LinearLayout actions = new LinearLayout(this);
-                equal(actions, Style.action(this, "复制", false, () -> service.copyHistory(entry)));
-                equal(actions, Style.action(this, "删除", false, () -> confirmHistoryDelete(service, entry)));
-                add(card, actions, 8, dp(44));
+                card.setOnClickListener(view -> {
+                    if (!selected.isEmpty()) {
+                        if (!selected.remove(entry.key)) selected.add(entry.key);
+                        updateSelection.run();
+                        return;
+                    }
+                    service.copyHistory(entry, result -> {
+                        if (!feedback.isAttachedToWindow() || !selected.isEmpty()) return;
+                        feedback.removeCallbacks(hideFeedback);
+                        feedback.setText(result);
+                        feedback.setVisibility(View.VISIBLE);
+                        feedback.postDelayed(hideFeedback, 1600);
+                    });
+                });
+                card.setOnLongClickListener(view -> {
+                    hideFeedback.run();
+                    selected.add(entry.key);
+                    updateSelection.run();
+                    return true;
+                });
                 add(rows, card, rows.getChildCount() == 0 ? 0 : 8, -2);
             }
             if (rows.getChildCount() == 0) {
@@ -371,16 +427,25 @@ public final class MainActivity extends Activity {
                 empty.setGravity(Gravity.CENTER);
                 add(rows, empty, 12, dp(68));
             }
+            updateSelection.run();
         };
-        TextView from = historyDateButton("开始日期", 0, bounds, zone, refresh);
-        TextView until = historyDateButton("结束日期", 1, bounds, zone, refresh);
+        Runnable resetSelection = () -> {
+            selected.clear();
+            refresh.run();
+        };
+        cancel.setOnClickListener(view -> {
+            selected.clear();
+            updateSelection.run();
+        });
+        TextView from = historyDateButton("开始日期", 0, bounds, zone, resetSelection);
+        TextView until = historyDateButton("结束日期", 1, bounds, zone, resetSelection);
         equal(dates, from);
         equal(dates, until);
         TextView reset = Style.action(this, "清除", false, () -> {
             bounds[0] = bounds[1] = null;
             from.setText("开始日期");
             until.setText("结束日期");
-            refresh.run();
+            resetSelection.run();
         });
         reset.setContentDescription("清除日期筛选");
         reset.setPadding(0, 0, 0, 0);
@@ -389,10 +454,18 @@ public final class MainActivity extends Activity {
         dates.addView(reset, resetSize);
         query.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { refresh.run(); }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { resetSelection.run(); }
             @Override public void afterTextChanged(android.text.Editable value) { }
         });
-        Dialog dialog = appDialog(body);
+        Dialog[] historyDialog = new Dialog[1];
+        Dialog dialog = appDialog(body, () -> {
+            if (selected.isEmpty()) historyDialog[0].dismiss();
+            else {
+                selected.clear();
+                updateSelection.run();
+            }
+        });
+        historyDialog[0] = dialog;
         dialogActions(body, dialog, "关闭", null, null);
         showDialog(dialog, body);
         refreshHistory = () -> service.loadHistory(result -> {
@@ -472,12 +545,12 @@ public final class MainActivity extends Activity {
         add(body, buttons, 12, dp(44));
     }
 
-    private void confirmHistoryDelete(SyncService service, ClipHistory.Entry entry) {
-        LinearLayout body = dialogBody("删除这条记录？");
+    private void confirmHistoryDelete(SyncService service, java.util.List<String> keys) {
+        LinearLayout body = dialogBody("删除所选 " + keys.size() + " 条记录？");
         add(body, Style.label(this, "删除会同步到其他设备。", 14, Style.MUTED, false), 0, -2);
         Dialog dialog = appDialog(body);
         dialogActions(body, dialog, "取消", "删除", () -> {
-            service.deleteHistory(entry);
+            service.deleteHistory(keys);
             dialog.dismiss();
         });
         showDialog(dialog, body);
@@ -557,27 +630,24 @@ public final class MainActivity extends Activity {
         showDialog(editor.dialog, body);
     }
 
-    private void addHistoryImage(LinearLayout card, SyncService service, ClipHistory.Entry entry) {
+    private Runnable addHistoryImage(LinearLayout card, SyncService service, ClipHistory.Entry entry) {
         android.widget.ImageView image = new android.widget.ImageView(this);
         image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         image.setBackground(Style.surface(this, Style.TINT, 10));
         image.setClipToOutline(true);
-        card.setContentDescription("展开图片");
-        card.setFocusable(true);
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(112), dp(72));
         card.addView(image, size);
         android.graphics.Bitmap[] thumbnail = new android.graphics.Bitmap[1];
-        card.setOnClickListener(view -> {
+        Runnable togglePreview = () -> {
             boolean expand = size.width != -1;
             size.width = expand ? -1 : dp(112);
             size.height = expand ? dp(240) : dp(72);
             image.setLayoutParams(size);
-            card.setContentDescription(expand ? "收起图片" : "展开图片");
             if (!expand) image.setImageBitmap(thumbnail[0]);
             if (expand) service.loadHistoryImage(entry, 1440, bitmap -> {
                 if (image.isAttachedToWindow() && size.width == -1 && bitmap != null) image.setImageBitmap(bitmap);
             });
-        });
+        };
         service.loadHistoryImage(entry, 176, bitmap -> {
             thumbnail[0] = bitmap;
             if (image.isAttachedToWindow() && size.width != -1) {
@@ -585,6 +655,7 @@ public final class MainActivity extends Activity {
                 if (bitmap == null) image.setContentDescription("图片无法读取");
             }
         });
+        return togglePreview;
     }
 
     private void refreshStatus() {

@@ -126,8 +126,18 @@ public final class SyncService extends Service {
         });
     }
 
-    void deleteHistory(ClipHistory.Entry entry) {
-        worker.post(() -> record(ClipHistory.tombstone(entry.key), true));
+    void deleteHistory(java.util.List<String> keys) {
+        worker.post(() -> {
+            java.util.List<Wire.Frame> changes = new java.util.ArrayList<>();
+            for (String key : keys) {
+                try {
+                    changes.addAll(history.apply(ClipHistory.tombstone(key), true));
+                } catch (IOException error) {
+                    android.util.Log.w("ClipHistory", "History deletion failed", error);
+                }
+            }
+            publishHistory(changes, true);
+        });
     }
 
     void editHistory(ClipHistory.Entry entry, String text, java.util.function.Consumer<String> callback) {
@@ -162,7 +172,7 @@ public final class SyncService extends Service {
         if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
     }
 
-    void copyHistory(ClipHistory.Entry entry) {
+    void copyHistory(ClipHistory.Entry entry, java.util.function.Consumer<String> callback) {
         worker.post(() -> {
             String result;
             try {
@@ -172,7 +182,7 @@ public final class SyncService extends Service {
                 result = "无法复制该记录";
             }
             String message = result;
-            main.post(() -> android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show());
+            main.post(() -> callback.accept(message));
         });
     }
 

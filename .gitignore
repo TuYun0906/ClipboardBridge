@@ -1,0 +1,11 @@
+**/build/
+/android/deps/*
+!/android/deps/SHIZUKU-LICENSE.txt
+/tests/tls-build/
+/tests/classes/
+*.apk
+*.exe
+*.bin
+*.p12
+*.pfx
+*.keystore

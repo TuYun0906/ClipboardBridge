@@ -1,0 +1,30 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="clip.bridge">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <queries><package android:name="moe.shizuku.privileged.api" /></queries>
+    <application android:label="剪贴板" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar" android:icon="@drawable/clip_icon">
+        <activity android:name="clip.MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name="clip.SyncService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <provider android:name="clip.ClipboardImages" android:authorities="clip.bridge.images"
+            android:exported="false" android:grantUriPermissions="true" />
+        <provider android:name="rikka.shizuku.ShizukuProvider" android:authorities="clip.bridge.shizuku"
+            android:exported="true" android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
+    </application>
+</manifest>

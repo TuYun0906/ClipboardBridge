@@ -1,0 +1,136 @@
+package clip;
+
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.ParcelFileDescriptor;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
+
+final class AndroidClipboard {
+    private static final long PIXEL_LIMIT = 24_000_000L;
+    private final Context context;
+    private final ClipboardManager manager;
+    private final String remoteLabel;
+    private long lastTimestamp = -1;
+    private Object lastValue;
+
+    AndroidClipboard(Context context) {
+        this.context = context.getApplicationContext();
+        manager = this.context.getSystemService(ClipboardManager.class);
+        remoteLabel = this.context.getPackageName() + ".received";
+    }
+
+    void listen(ClipboardManager.OnPrimaryClipChangedListener listener) {
+        manager.addPrimaryClipChangedListener(listener);
+    }
+
+    void unlisten(ClipboardManager.OnPrimaryClipChangedListener listener) {
+        manager.removePrimaryClipChangedListener(listener);
+    }
+
+    // Called from the focused UI thread. It only takes a snapshot, leaving image I/O to a worker.
+    Object snapshot(boolean focused, boolean autoSend) {
+        if (!focused || !autoSend) return null;
+        ClipData clip = manager.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0) return null;
+        ClipDescription description = clip.getDescription();
+        if (remoteLabel.contentEquals(String.valueOf(description.getLabel()))) return null;
+        ClipData.Item item = clip.getItemAt(0);
+        Object value;
+        if (item.getUri() != null && description.hasMimeType("image/*"))
+            value = item.getUri();
+        else if (item.getText() != null)
+            value = item.getText().toString();
+        else return null;
+        long timestamp = description.getTimestamp();
+        if (timestamp == lastTimestamp && value.equals(lastValue)) return null;
+        lastTimestamp = timestamp;
+        lastValue = value;
+        return value;
+    }
+
+    Wire.Frame makeFrame(Object snapshot) throws IOException {
+        if (snapshot instanceof Uri) {
+            return new Wire.Frame(Wire.IMAGE, id(), imageBytes((Uri) snapshot));
+        }
+        if (snapshot instanceof ParcelFileDescriptor) {
+            try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream((ParcelFileDescriptor)snapshot)) {
+                return new Wire.Frame(Wire.IMAGE, id(), imageBytes(in));
+            }
+        }
+        if (!(snapshot instanceof String)) throw new IOException("No clipboard content");
+        String text = (String) snapshot;
+        if (text.isEmpty() || text.length() > Wire.TEXT_LIMIT) throw new IOException("Invalid text length");
+        byte[] data = text.getBytes(StandardCharsets.UTF_8);
+        if (data.length > Wire.TEXT_LIMIT) throw new IOException("Text exceeds size limit");
+        return new Wire.Frame(Wire.TEXT, id(), data);
+    }
+
+    // Image storage and validation run on the receiving worker before acknowledging the frame.
+    void apply(Wire.Frame frame) throws IOException {
+        ClipData clip;
+        if (frame.kind == Wire.TEXT) {
+            String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(frame.data)).toString();
+            clip = ClipData.newPlainText(remoteLabel, text);
+        } else if (frame.kind == Wire.IMAGE) {
+            String extension = ImageFormat.extension(frame.data);
+            validateImage(frame.data);
+            Uri uri = ClipboardImages.store(context, frame.data, extension);
+            clip = ClipData.newUri(context.getContentResolver(), remoteLabel, uri);
+        } else throw new IOException("Unexpected clipboard frame");
+        manager.setPrimaryClip(clip);
+    }
+
+    private byte[] imageBytes(Uri uri) throws IOException {
+        try (InputStream in = context.getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("Image unavailable");
+            return imageBytes(in);
+        } catch (SecurityException error) { throw new IOException("Image cannot be read", error); }
+    }
+
+    private byte[] imageBytes(InputStream in) throws IOException {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[16384];
+            for (int n; (n = in.read(buffer)) != -1;) {
+                if (out.size() + n > Wire.IMAGE_LIMIT) throw new IOException("Image exceeds size limit");
+                out.write(buffer, 0, n);
+            }
+            byte[] data = out.toByteArray();
+            validateImage(data);
+            if (ImageFormat.extension(data) != null) return data;
+
+            Bitmap decoded = BitmapFactory.decodeByteArray(data, 0, data.length);
+            if (decoded == null) throw new IOException("Invalid image");
+            try {
+                out.reset();
+                if (!decoded.compress(Bitmap.CompressFormat.PNG, 100, out) ||
+                        out.size() > Wire.IMAGE_LIMIT) throw new IOException("Converted image exceeds size limit");
+                return out.toByteArray();
+            } finally { decoded.recycle(); }
+    }
+
+    private static void validateImage(byte[] data) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0 ||
+                (long) bounds.outWidth * bounds.outHeight > PIXEL_LIMIT) throw new IOException("Invalid image dimensions");
+    }
+
+    private static byte[] id() {
+        UUID uuid = UUID.randomUUID();
+        return ByteBuffer.allocate(Wire.ID_SIZE).putLong(uuid.getMostSignificantBits())
+                .putLong(uuid.getLeastSignificantBits()).array();
+    }
+}

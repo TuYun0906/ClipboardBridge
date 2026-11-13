@@ -414,17 +414,17 @@ public final class MainActivity extends Activity {
         image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         image.setBackground(Style.surface(this, Style.TINT, 10));
         image.setClipToOutline(true);
-        image.setContentDescription("展开图片");
-        image.setFocusable(true);
+        card.setContentDescription("展开图片");
+        card.setFocusable(true);
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(112), dp(72));
         card.addView(image, size);
         android.graphics.Bitmap[] thumbnail = new android.graphics.Bitmap[1];
-        image.setOnClickListener(view -> {
+        card.setOnClickListener(view -> {
             boolean expand = size.width != -1;
             size.width = expand ? -1 : dp(112);
             size.height = expand ? dp(240) : dp(72);
             image.setLayoutParams(size);
-            image.setContentDescription(expand ? "收起图片" : "展开图片");
+            card.setContentDescription(expand ? "收起图片" : "展开图片");
             if (!expand) image.setImageBitmap(thumbnail[0]);
             if (expand) service.loadHistoryImage(entry, 1440, bitmap -> {
                 if (image.isAttachedToWindow() && size.width == -1 && bitmap != null) image.setImageBitmap(bitmap);

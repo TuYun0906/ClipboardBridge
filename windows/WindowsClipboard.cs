@@ -143,6 +143,28 @@ internal sealed class WindowsClipboard : IDisposable
         return data;
     }
 
+    internal static BitmapSource DecodePreview(byte[] bytes, int limit)
+    {
+        using (var input = new MemoryStream(bytes, false))
+        {
+            var metadata = BitmapDecoder.Create(input, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None).Frames[0];
+            int width = metadata.PixelWidth, height = metadata.PixelHeight;
+            input.Position = 0;
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.StreamSource = input;
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            if (Math.Max(width, height) > limit)
+            {
+                if (width >= height) image.DecodePixelWidth = limit;
+                else image.DecodePixelHeight = limit;
+            }
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+    }
+
     private static BitmapSource Decode(byte[] bytes)
     {
         if (bytes.Length == 0 || bytes.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");

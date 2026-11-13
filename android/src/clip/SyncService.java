@@ -106,7 +106,7 @@ public final class SyncService extends Service {
         });
     }
 
-    void loadHistoryImage(ClipHistory.Entry entry,
+    void loadHistoryImage(ClipHistory.Entry entry, int maxSide,
             java.util.function.Consumer<android.graphics.Bitmap> callback) {
         worker.post(() -> {
             android.graphics.Bitmap bitmap = null;
@@ -117,7 +117,7 @@ public final class SyncService extends Service {
                 android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
                 options.inJustDecodeBounds = false;
                 options.inSampleSize = 1;
-                while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > 1800)
+                while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > maxSide)
                     options.inSampleSize *= 2;
                 bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
             } catch (IOException | RuntimeException ignored) { }

@@ -1,7 +1,7 @@
 package clip;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -242,18 +242,16 @@ public final class MainActivity extends Activity {
         EditText entry = field("输入要发送的文字", "");
         entry.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         entry.setMinLines(3);
-        LinearLayout body = Style.column(this);
-        body.setPadding(dp(20), dp(7), dp(20), 0);
-        body.addView(entry, new LinearLayout.LayoutParams(-1, -2));
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("发送文字").setView(body)
-                .setNegativeButton("取消", null).setPositiveButton("发送", null).create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+        LinearLayout body = dialogBody("发送文字");
+        add(body, entry, 0, -2);
+        Dialog dialog = appDialog(body);
+        dialogActions(body, dialog, "取消", "发送", () -> {
             String text = entry.getText().toString();
             if (text.isEmpty()) { entry.setError("请输入文字"); return; }
             submit(text);
             dialog.dismiss();
-        }));
-        dialog.show();
+        });
+        showDialog(dialog, body);
     }
 
     private void selectImage() {
@@ -277,15 +275,17 @@ public final class MainActivity extends Activity {
     private void showHelp() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout body = Style.column(this);
-        body.setPadding(dp(20), dp(4), dp(20), dp(16));
         scroll.addView(body);
         helpSection(body, "局域网配对", "让电脑和安卓设备连接同一个局域网。在电脑「设置」查看地址并复制配对码，在安卓端填写两项并点「保存连接」。");
         helpSection(body, "Shizuku 后台同步", "安装 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可在 Shizuku 里使用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         helpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         helpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络，并都开启公网模式。把 Windows 设置中显示的 Tailscale 地址和原配对码填到安卓端，再保存连接。");
         helpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
-        new AlertDialog.Builder(this).setTitle("如何上手").setView(scroll)
-                .setPositiveButton("关闭", null).show();
+        LinearLayout panel = dialogBody("如何上手");
+        add(panel, scroll, 0, Math.min(dp(360), getResources().getDisplayMetrics().heightPixels / 2));
+        Dialog dialog = appDialog(panel);
+        dialogActions(panel, dialog, "关闭", null, null);
+        showDialog(dialog, panel);
     }
 
     private void helpSection(LinearLayout body, String title, String instructions) {
@@ -307,10 +307,7 @@ public final class MainActivity extends Activity {
     private void showHistory() {
         SyncService service = SyncService.running;
         if (service == null) return;
-        LinearLayout body = Style.column(this);
-        body.setPadding(dp(16), dp(15), dp(16), dp(14));
-        body.setBackground(Style.surface(this, Style.BACKGROUND, 22));
-        body.setFocusableInTouchMode(true);
+        LinearLayout body = dialogBody("剪贴板历史");
         EditText query = field("搜索文字或图片", "");
         query.setBackground(Style.surface(this, Style.WHITE, 12));
         query.setSingleLine(true);
@@ -328,19 +325,16 @@ public final class MainActivity extends Activity {
                 LinearLayout card = Style.column(this);
                 card.setBackground(Style.surface(this, Style.WHITE, 14));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
-                TextView label = Style.label(this, entry.text, 15, Style.INK, false);
-                label.setMaxLines(3);
-                label.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                add(card, label, 0, -2);
+                if (entry.kind == Wire.IMAGE) addHistoryImage(card, service, entry);
+                else {
+                    TextView label = Style.label(this, entry.text, 15, Style.INK, false);
+                    label.setMaxLines(3);
+                    label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    add(card, label, 0, -2);
+                }
                 LinearLayout actions = new LinearLayout(this);
-                if (entry.kind == Wire.IMAGE)
-                    equal(actions, Style.action(this, "预览", false, () -> previewHistory(service, entry)));
                 equal(actions, Style.action(this, "复制", false, () -> service.copyHistory(entry)));
-                equal(actions, Style.action(this, "删除", false, () -> new AlertDialog.Builder(this)
-                        .setTitle("删除这条记录？")
-                        .setMessage("删除会同步到其他设备。")
-                        .setNegativeButton("取消", null)
-                        .setPositiveButton("删除", (dialog, which) -> service.deleteHistory(entry)).show()));
+                equal(actions, Style.action(this, "删除", false, () -> confirmHistoryDelete(service, entry)));
                 add(card, actions, 8, dp(44));
                 add(rows, card, rows.getChildCount() == 0 ? 0 : 8, -2);
             }
@@ -355,11 +349,9 @@ public final class MainActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) { refresh.run(); }
             @Override public void afterTextChanged(android.text.Editable value) { }
         });
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("剪贴板历史")
-                .setView(body).setPositiveButton("关闭", null).create();
-        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-        dialog.show();
-        body.requestFocus();
+        Dialog dialog = appDialog(body);
+        dialogActions(body, dialog, "关闭", null, null);
+        showDialog(dialog, body);
         refreshHistory = () -> service.loadHistory(result -> {
             if (!dialog.isShowing()) return;
             entries.clear();
@@ -370,22 +362,80 @@ public final class MainActivity extends Activity {
         refreshHistory.run();
     }
 
-    private void previewHistory(SyncService service, ClipHistory.Entry entry) {
-        service.loadHistoryImage(entry, bitmap -> {
-            if (isFinishing() || isDestroyed()) return;
-            if (bitmap == null) {
-                Toast.makeText(this, "无法预览该图片", Toast.LENGTH_SHORT).show();
-                return;
+    private LinearLayout dialogBody(String title) {
+        LinearLayout body = Style.column(this);
+        body.setPadding(dp(16), dp(15), dp(16), dp(14));
+        body.setBackground(Style.surface(this, Style.BACKGROUND, 22));
+        body.setFocusableInTouchMode(true);
+        TextView heading = Style.label(this, title, 20, Style.INK, true);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(12);
+        body.addView(heading, params);
+        return body;
+    }
+
+    private Dialog appDialog(LinearLayout body) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        dialog.setContentView(body);
+        dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE |
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        return dialog;
+    }
+
+    private void showDialog(Dialog dialog, LinearLayout body) {
+        dialog.show();
+        dialog.getWindow().setLayout(Math.min(dp(520),
+                getResources().getDisplayMetrics().widthPixels - dp(32)), -2);
+        body.requestFocus();
+    }
+
+    private void dialogActions(LinearLayout body, Dialog dialog, String cancel, String confirm, Runnable action) {
+        LinearLayout buttons = new LinearLayout(this);
+        equal(buttons, Style.action(this, cancel, false, dialog::dismiss));
+        if (confirm != null) equal(buttons, Style.action(this, confirm, true, action));
+        add(body, buttons, 12, dp(44));
+    }
+
+    private void confirmHistoryDelete(SyncService service, ClipHistory.Entry entry) {
+        LinearLayout body = dialogBody("删除这条记录？");
+        add(body, Style.label(this, "删除会同步到其他设备。", 14, Style.MUTED, false), 0, -2);
+        Dialog dialog = appDialog(body);
+        dialogActions(body, dialog, "取消", "删除", () -> {
+            service.deleteHistory(entry);
+            dialog.dismiss();
+        });
+        showDialog(dialog, body);
+    }
+
+    private void addHistoryImage(LinearLayout card, SyncService service, ClipHistory.Entry entry) {
+        android.widget.ImageView image = new android.widget.ImageView(this);
+        image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+        image.setBackground(Style.surface(this, Style.TINT, 10));
+        image.setClipToOutline(true);
+        image.setContentDescription("展开图片");
+        image.setFocusable(true);
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(112), dp(72));
+        card.addView(image, size);
+        android.graphics.Bitmap[] thumbnail = new android.graphics.Bitmap[1];
+        image.setOnClickListener(view -> {
+            boolean expand = size.width != -1;
+            size.width = expand ? -1 : dp(112);
+            size.height = expand ? dp(240) : dp(72);
+            image.setLayoutParams(size);
+            image.setContentDescription(expand ? "收起图片" : "展开图片");
+            if (!expand) image.setImageBitmap(thumbnail[0]);
+            if (expand) service.loadHistoryImage(entry, 1440, bitmap -> {
+                if (image.isAttachedToWindow() && size.width == -1 && bitmap != null) image.setImageBitmap(bitmap);
+            });
+        });
+        service.loadHistoryImage(entry, 176, bitmap -> {
+            thumbnail[0] = bitmap;
+            if (image.isAttachedToWindow() && size.width != -1) {
+                image.setImageBitmap(bitmap);
+                if (bitmap == null) image.setContentDescription("图片无法读取");
             }
-            android.widget.ImageView image = new android.widget.ImageView(this);
-            image.setImageBitmap(bitmap);
-            image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-            image.setContentDescription("历史图片预览");
-            LinearLayout body = Style.column(this);
-            body.setPadding(dp(12), 0, dp(12), 0);
-            add(body, image, 0, Math.min(dp(540), getResources().getDisplayMetrics().heightPixels / 2));
-            new AlertDialog.Builder(this).setTitle("图片预览").setView(body)
-                    .setPositiveButton("关闭", null).show();
         });
     }
 

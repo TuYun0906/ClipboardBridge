@@ -19,6 +19,8 @@ internal sealed class MainWindow : Window
     private readonly Program program;
     private TextBlock status;
     private Window settings;
+    private readonly System.Threading.Tasks.TaskScheduler thumbnailLoader =
+        new System.Threading.Tasks.ConcurrentExclusiveSchedulerPair().ExclusiveScheduler;
 
     internal MainWindow(Program program)
     {
@@ -103,16 +105,17 @@ internal sealed class MainWindow : Window
                 row.Children.Add(copy);
                 if (entry.Kind == Wire.Image)
                 {
-                    var preview = Action("预览", false, () => PreviewHistory(entry.Path));
-                    preview.Width = 62;
-                    preview.Margin = new Thickness(0, 0, 6, 0);
-                    DockPanel.SetDock(preview, Dock.Right);
-                    row.Children.Add(preview);
+                    row.Height = 68;
+                    copy.Height = delete.Height = 36;
+                    AddHistoryImage(row, entry.Path);
                 }
-                var text = Label(entry.Label, 14, Ink, false);
-                text.Margin = new Thickness(5, 0, 10, 0);
-                text.VerticalAlignment = VerticalAlignment.Center;
-                row.Children.Add(text);
+                else
+                {
+                    var text = Label(entry.Label, 14, Ink, false);
+                    text.Margin = new Thickness(5, 0, 10, 0);
+                    text.VerticalAlignment = VerticalAlignment.Center;
+                    row.Children.Add(text);
+                }
                 items.Items.Add(new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch });
             }
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
@@ -135,7 +138,15 @@ internal sealed class MainWindow : Window
         AddHelpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         AddHelpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络。在电脑开启公网模式并保存，记下显示的 Tailscale 地址。安卓端也切到公网模式，填写这个地址和原来的配对码，再保存连接。");
         AddHelpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
-        dialog.Content = new ScrollViewer { Content = body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var shell = new DockPanel { Background = BackgroundColor, Margin = new Thickness(0) };
+        var close = Action("关闭", false, dialog.Close);
+        close.Height = 40;
+        close.Margin = new Thickness(19, 8, 19, 16);
+        close.IsCancel = true;
+        DockPanel.SetDock(close, Dock.Bottom);
+        shell.Children.Add(close);
+        shell.Children.Add(new ScrollViewer { Content = body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        dialog.Content = shell;
         dialog.ShowDialog();
     }
 
@@ -160,25 +171,47 @@ internal sealed class MainWindow : Window
         body.Children.Add(link);
     }
 
-    private void PreviewHistory(string path)
+    private void AddHistoryImage(DockPanel row, string path)
     {
-        try
+        var image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Left };
+        var toggle = new Button
         {
-            var source = WindowsClipboard.ToClipboardData(ClipHistory.Read(path)).GetImage();
-            if (source == null) throw new IOException("无法读取图片");
-            var preview = new Window
+            Content = image, Background = Tint, BorderThickness = new Thickness(0),
+            Width = 104, Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand
+        };
+        row.Children.Add(toggle);
+        bool expanded = false;
+        System.Windows.Media.Imaging.BitmapSource thumbnail = null, preview = null;
+        Func<int, System.Threading.Tasks.Task<System.Windows.Media.Imaging.BitmapSource>> load = size =>
+        {
+            return System.Threading.Tasks.Task.Factory.StartNew(() =>
             {
-                Owner = this, Title = "图片预览", Width = 640, Height = 510,
-                MinWidth = 280, MinHeight = 230, ShowInTaskbar = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = BackgroundColor,
-                Content = new Image { Source = source, Stretch = Stretch.Uniform, Margin = new Thickness(16) }
-            };
-            preview.ShowDialog();
-        }
-        catch (Exception error)
+                try { return WindowsClipboard.DecodePreview(ClipHistory.Read(path).Data, size); }
+                catch (Exception) { return null; }
+            }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None, thumbnailLoader);
+        };
+        toggle.ToolTip = "展开图片";
+        System.Windows.Automation.AutomationProperties.SetName(toggle, "展开图片");
+        toggle.Loaded += async (sender, args) =>
         {
-            MessageBox.Show(this, error.Message, "无法预览图片");
-        }
+            if (thumbnail != null) return;
+            thumbnail = await load(176);
+            if (!expanded) image.Source = thumbnail;
+            if (thumbnail == null) toggle.ToolTip = "图片无法读取";
+        };
+        toggle.Click += async (sender, args) =>
+        {
+            expanded = !expanded;
+            row.Height = expanded ? 310 : 68;
+            if (expanded) toggle.ClearValue(WidthProperty);
+            else toggle.Width = 104;
+            string action = expanded ? "收起图片" : "展开图片";
+            toggle.ToolTip = action;
+            System.Windows.Automation.AutomationProperties.SetName(toggle, action);
+            if (expanded && preview == null) preview = await load(1440);
+            image.Source = expanded ? preview ?? thumbnail : thumbnail;
+            if (image.Source == null) toggle.ToolTip = "图片无法读取";
+        };
     }
 
     internal void OpenSettings()

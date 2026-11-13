@@ -116,7 +116,15 @@ internal sealed class MainWindow : Window
                     text.VerticalAlignment = VerticalAlignment.Center;
                     row.Children.Add(text);
                 }
-                items.Items.Add(new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch });
+                var item = new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+                item.ToolTip = "双击预览";
+                item.MouseDoubleClick += (sender, args) =>
+                {
+                    if (args.ChangedButton != MouseButton.Left || copy.IsMouseOver || delete.IsMouseOver) return;
+                    args.Handled = true;
+                    OpenHistoryPreview(entry);
+                };
+                items.Items.Add(item);
             }
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
         };
@@ -173,44 +181,98 @@ internal sealed class MainWindow : Window
 
     private void AddHistoryImage(DockPanel row, string path)
     {
-        var image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Left };
-        var toggle = new Button
+        var image = new Image { Stretch = Stretch.Uniform };
+        var thumbnail = new Border
         {
-            Content = image, Background = Tint, BorderThickness = new Thickness(0),
-            Width = 104, Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand
+            Child = image, Background = Tint, CornerRadius = new CornerRadius(8),
+            Width = 104, Margin = new Thickness(0, 0, 8, 0), HorizontalAlignment = HorizontalAlignment.Left
         };
-        row.Children.Add(toggle);
-        bool expanded = false;
-        System.Windows.Media.Imaging.BitmapSource thumbnail = null, preview = null;
-        Func<int, System.Threading.Tasks.Task<System.Windows.Media.Imaging.BitmapSource>> load = size =>
+        row.Children.Add(thumbnail);
+        thumbnail.Loaded += async (sender, args) =>
         {
-            return System.Threading.Tasks.Task.Factory.StartNew(() =>
+            if (image.Source != null) return;
+            image.Source = await LoadHistoryImage(path, 176);
+            if (image.Source == null) thumbnail.ToolTip = "图片无法读取";
+        };
+    }
+
+    private System.Threading.Tasks.Task<System.Windows.Media.Imaging.BitmapSource> LoadHistoryImage(string path, int limit)
+    {
+        return System.Threading.Tasks.Task.Factory.StartNew(() =>
+        {
+            try { return WindowsClipboard.DecodePreview(ClipHistory.Read(path).Data, limit); }
+            catch (Exception) { return null; }
+        }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None, thumbnailLoader);
+    }
+
+    private void OpenHistoryPreview(ClipHistory.Entry entry)
+    {
+        bool isImage = entry.Kind == Wire.Image;
+        var window = new Window
+        {
+            Owner = this, Title = isImage ? "图片预览" : "文字预览",
+            Width = Math.Min(740, SystemParameters.WorkArea.Width),
+            Height = Math.Min(560, SystemParameters.WorkArea.Height),
+            MinWidth = 300, MinHeight = 220, ShowInTaskbar = false, FontFamily = UiFont,
+            Background = BackgroundColor, WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        window.PreviewKeyDown += (sender, args) => { if (args.Key == Key.Escape) window.Close(); };
+        var layout = new DockPanel { Margin = new Thickness(16) };
+        var hint = Label(isImage ? "滚轮缩放图片" : "滚轮调整字号 · 拖动滚动条浏览", 13, Muted, false);
+        hint.Margin = new Thickness(0, 0, 0, 10);
+        DockPanel.SetDock(hint, Dock.Top);
+        layout.Children.Add(hint);
+        window.Content = layout;
+        if (isImage) AddImagePreview(window, layout, entry.Path);
+        else
+        {
+            var text = new TextBox
             {
-                try { return WindowsClipboard.DecodePreview(ClipHistory.Read(path).Data, size); }
-                catch (Exception) { return null; }
-            }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None, thumbnailLoader);
-        };
-        toggle.ToolTip = "展开图片";
-        System.Windows.Automation.AutomationProperties.SetName(toggle, "展开图片");
-        toggle.Loaded += async (sender, args) =>
+                Text = entry.Text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, AcceptsReturn = true,
+                FontSize = 16, Foreground = Ink, BorderBrush = BorderColor, Padding = new Thickness(12)
+            };
+            window.PreviewMouseWheel += (sender, args) =>
+            {
+                text.FontSize = Math.Max(10, Math.Min(72, text.FontSize * Math.Pow(1.12, args.Delta / 120.0)));
+                args.Handled = true;
+            };
+            layout.Children.Add(text);
+        }
+        window.Show();
+    }
+
+    private void AddImagePreview(Window window, Panel layout, string path)
+    {
+        var image = new Image { Stretch = Stretch.Uniform };
+        var scroll = new ScrollViewer
         {
-            if (thumbnail != null) return;
-            thumbnail = await load(176);
-            if (!expanded) image.Source = thumbnail;
-            if (thumbnail == null) toggle.ToolTip = "图片无法读取";
+            Content = image, Background = Brushes.White,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
-        toggle.Click += async (sender, args) =>
+        layout.Children.Add(scroll);
+        double zoom = 1;
+        Action resize = () =>
         {
-            expanded = !expanded;
-            row.Height = expanded ? 310 : 68;
-            if (expanded) toggle.ClearValue(WidthProperty);
-            else toggle.Width = 104;
-            string action = expanded ? "收起图片" : "展开图片";
-            toggle.ToolTip = action;
-            System.Windows.Automation.AutomationProperties.SetName(toggle, action);
-            if (expanded && preview == null) preview = await load(1440);
-            image.Source = expanded ? preview ?? thumbnail : thumbnail;
-            if (image.Source == null) toggle.ToolTip = "图片无法读取";
+            var source = image.Source;
+            if (source == null || scroll.ActualWidth <= 0 || scroll.ActualHeight <= 0) return;
+            double fit = Math.Min(1, Math.Min(scroll.ActualWidth / source.Width, scroll.ActualHeight / source.Height));
+            image.Width = source.Width * fit * zoom;
+            image.Height = source.Height * fit * zoom;
+        };
+        scroll.SizeChanged += (sender, args) => resize();
+        window.PreviewMouseWheel += (sender, args) =>
+        {
+            zoom = Math.Max(0.25, Math.Min(12, zoom * Math.Pow(1.15, args.Delta / 120.0)));
+            resize();
+            args.Handled = true;
+        };
+        window.Loaded += async (sender, args) =>
+        {
+            image.Source = await LoadHistoryImage(path, 4096);
+            if (image.Source != null) resize();
+            else scroll.Content = Label("图片无法读取", 14, Muted, false);
         };
     }
 

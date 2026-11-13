@@ -74,6 +74,16 @@ final class ClipHistory {
         return changes;
     }
 
+    synchronized List<Wire.Frame> edit(String key, Wire.Frame replacement) throws IOException {
+        Entry previous = records.get(key);
+        if (previous == null || previous.kind != Wire.TEXT ||
+                previous.text.equals(new String(replacement.data, StandardCharsets.UTF_8)))
+            return Collections.emptyList();
+        List<Wire.Frame> changes = apply(replacement, true);
+        if (delete(key)) changes.add(tombstone(key));
+        return changes;
+    }
+
     synchronized List<Entry> entries() {
         List<Entry> result = new ArrayList<>(records.values());
         result.sort(Comparator.comparing((Entry entry) -> order(entry.key)).reversed());

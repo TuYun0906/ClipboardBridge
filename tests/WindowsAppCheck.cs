@@ -53,11 +53,27 @@ internal static class WindowsAppCheck
                 .Children.OfType<TextBlock>().Any(label => label.Text.StartsWith("长")));
             var textWindow = OpenPreview(app, window, textRow);
             var text = Find<TextBox>(textWindow);
-            if (text.Text != longText || !text.IsReadOnly) throw new Exception("Full text preview missing");
+            if (text.Text != longText || text.IsReadOnly) throw new Exception("Editable full text preview missing");
+            var previewLayout = (DockPanel)textWindow.Content;
+            var save = previewLayout.Children.OfType<Button>().Single();
+            if (save.Visibility != Visibility.Collapsed) throw new Exception("Save visible before editing");
             double fontSize = text.FontSize;
             Wheel(textWindow, 120);
             if (text.FontSize <= fontSize) throw new Exception("Text wheel did not zoom");
-            textWindow.Close();
+            text.Text = "编辑后的文字";
+            if (save.Visibility != Visibility.Visible) throw new Exception("Save hidden after editing");
+            text.Text = longText;
+            if (save.Visibility != Visibility.Collapsed) throw new Exception("Save still visible after undo");
+            text.Text = "编辑后的文字";
+            save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            for (int i = 0; i < 40 && textWindow.IsVisible; i++)
+            {
+                System.Threading.Thread.Sleep(25);
+                Pump();
+            }
+            if (textWindow.IsVisible || program.History.Search("编辑后的文字").Length != 1 ||
+                program.History.Search("第二行").Length != 0)
+                throw new Exception("Saving the edited preview did not replace its history entry");
 
             var imageRow = list.Items.Cast<ListBoxItem>().Single(item => Find<Image>(item) != null);
             var imageWindow = OpenPreview(app, window, imageRow);

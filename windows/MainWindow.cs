@@ -224,22 +224,75 @@ internal sealed class MainWindow : Window
         layout.Children.Add(hint);
         window.Content = layout;
         if (isImage) AddImagePreview(window, layout, entry.Path);
-        else
-        {
-            var text = new TextBox
-            {
-                Text = entry.Text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, AcceptsReturn = true,
-                FontSize = 16, Foreground = Ink, BorderBrush = BorderColor, Padding = new Thickness(12)
-            };
-            window.PreviewMouseWheel += (sender, args) =>
-            {
-                text.FontSize = Math.Max(10, Math.Min(72, text.FontSize * Math.Pow(1.12, args.Delta / 120.0)));
-                args.Handled = true;
-            };
-            layout.Children.Add(text);
-        }
+        else AddTextPreview(window, layout, entry);
         window.Show();
+    }
+
+    private void AddTextPreview(Window window, DockPanel layout, ClipHistory.Entry entry)
+    {
+        var text = new TextBox
+        {
+            Text = entry.Text, TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, AcceptsReturn = true,
+            FontSize = 16, Foreground = Ink, BorderBrush = BorderColor, Padding = new Thickness(12)
+        };
+        string original = text.Text;
+        bool saving = false, allowClose = false;
+        Button save = null;
+        Action commit = async () =>
+        {
+            if (saving) return;
+            if (text.Text.Length == 0)
+            {
+                MessageBox.Show(window, "请输入文字。", "文字预览");
+                return;
+            }
+            saving = true;
+            save.IsEnabled = false;
+            text.IsReadOnly = true;
+            try
+            {
+                if (!await program.EditHistory(entry.Key, text.Text))
+                {
+                    MessageBox.Show(window, "这条记录已更新或删除。", "无法保存更改");
+                    return;
+                }
+                allowClose = true;
+                window.Close();
+            }
+            catch (IOException error) { MessageBox.Show(window, error.Message, "无法保存更改"); }
+            catch (UnauthorizedAccessException error) { MessageBox.Show(window, error.Message, "无法保存更改"); }
+            finally
+            {
+                saving = false;
+                save.IsEnabled = true;
+                text.IsReadOnly = false;
+            }
+        };
+        save = Action("保存", true, commit);
+        save.Height = 42;
+        save.Margin = new Thickness(0, 10, 0, 0);
+        save.Visibility = Visibility.Collapsed;
+        DockPanel.SetDock(save, Dock.Bottom);
+        layout.Children.Add(save);
+        layout.Children.Add(text);
+        text.TextChanged += (sender, args) =>
+            save.Visibility = text.Text == original ? Visibility.Collapsed : Visibility.Visible;
+        window.Closing += (sender, args) =>
+        {
+            if (allowClose || text.Text == original) return;
+            args.Cancel = true;
+            if (saving) return;
+            var answer = MessageBox.Show(window, "你编辑了这条信息，是否保存更改？", "保存更改",
+                MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.Yes);
+            if (answer == MessageBoxResult.No) args.Cancel = false;
+            else window.Dispatcher.BeginInvoke(commit);
+        };
+        window.PreviewMouseWheel += (sender, args) =>
+        {
+            text.FontSize = Math.Max(10, Math.Min(72, text.FontSize * Math.Pow(1.12, args.Delta / 120.0)));
+            args.Handled = true;
+        };
     }
 
     private void AddImagePreview(Window window, Panel layout, string path)

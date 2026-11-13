@@ -331,6 +331,7 @@ public final class MainActivity extends Activity {
                     label.setMaxLines(3);
                     label.setEllipsize(android.text.TextUtils.TruncateAt.END);
                     add(card, label, 0, -2);
+                    card.setOnClickListener(view -> previewHistoryText(service, entry));
                 }
                 LinearLayout actions = new LinearLayout(this);
                 equal(actions, Style.action(this, "复制", false, () -> service.copyHistory(entry)));
@@ -375,7 +376,13 @@ public final class MainActivity extends Activity {
     }
 
     private Dialog appDialog(LinearLayout body) {
-        Dialog dialog = new Dialog(this);
+        return appDialog(body, null);
+    }
+
+    private Dialog appDialog(LinearLayout body, Runnable close) {
+        Dialog dialog = close == null ? new Dialog(this) : new Dialog(this) {
+            @Override public void onBackPressed() { close.run(); }
+        };
         dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
         dialog.setContentView(body);
         dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
@@ -407,6 +414,80 @@ public final class MainActivity extends Activity {
             dialog.dismiss();
         });
         showDialog(dialog, body);
+    }
+
+    private void previewHistoryText(SyncService service, ClipHistory.Entry entry) {
+        LinearLayout body = dialogBody("文字预览");
+        EditText input = field("输入文字", entry.text);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        input.setBackground(Style.surface(this, Style.WHITE, 12));
+        add(body, input, 0, dp(160));
+        LinearLayout actions = new LinearLayout(this);
+        add(body, actions, 12, dp(44));
+
+        class Editor {
+            Dialog dialog;
+            View save;
+            boolean saving;
+
+            void save() {
+                if (saving) return;
+                String text = input.getText().toString();
+                if (text.isEmpty()) { input.setError("请输入文字"); return; }
+                if (text.equals(entry.text)) { dialog.dismiss(); return; }
+                if (text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > Wire.TEXT_LIMIT) {
+                    input.setError("文字超过大小限制");
+                    return;
+                }
+                saving = true;
+                input.setEnabled(false);
+                save.setEnabled(false);
+                service.editHistory(entry, text, error -> {
+                    if (!dialog.isShowing()) return;
+                    if (error == null) { dialog.dismiss(); return; }
+                    saving = false;
+                    input.setEnabled(true);
+                    save.setEnabled(true);
+                    input.setError(error);
+                });
+            }
+
+            void close() {
+                if (saving) return;
+                if (entry.text.contentEquals(input.getText())) { dialog.dismiss(); return; }
+                LinearLayout prompt = dialogBody("保存更改");
+                add(prompt, Style.label(MainActivity.this, "你编辑了这条信息，是否保存更改？",
+                        14, Style.MUTED, false), 0, -2);
+                Dialog confirmation = appDialog(prompt);
+                LinearLayout buttons = new LinearLayout(MainActivity.this);
+                equal(buttons, Style.action(MainActivity.this, "否", false, () -> {
+                    confirmation.dismiss();
+                    dialog.dismiss();
+                }));
+                equal(buttons, Style.action(MainActivity.this, "是", true, () -> {
+                    confirmation.dismiss();
+                    save();
+                }));
+                add(prompt, buttons, 12, dp(44));
+                showDialog(confirmation, prompt);
+            }
+        }
+        Editor editor = new Editor();
+        editor.dialog = appDialog(body, editor::close);
+        editor.dialog.setCanceledOnTouchOutside(false);
+        equal(actions, Style.action(this, "关闭", false, editor::close));
+        editor.save = Style.action(this, "保存", true, editor::save);
+        equal(actions, editor.save);
+        editor.save.setVisibility(View.GONE);
+        input.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                editor.save.setVisibility(entry.text.contentEquals(s) ? View.GONE : View.VISIBLE);
+            }
+            @Override public void afterTextChanged(android.text.Editable value) { }
+        });
+        showDialog(editor.dialog, body);
     }
 
     private void addHistoryImage(LinearLayout card, SyncService service, ClipHistory.Entry entry) {

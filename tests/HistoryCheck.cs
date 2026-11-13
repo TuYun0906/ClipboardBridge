@@ -34,6 +34,22 @@ static class HistoryCheck
         second.Apply(Text(1760000000020), true);
         if (second.Search("").Length != 1) throw new Exception("A new copy must be accepted");
         Console.WriteLine("PASS: offline merge, newest exact duplicate, durable deletion, and subsequent copy");
+        Frame original = Text(1760000000030);
+        Frame revised = new Frame(Wire.Text, Text(1760000000040).Id, Encoding.UTF8.GetBytes("编辑后\n第二行"));
+        first.Apply(original, true);
+        var changes = first.Edit(ClipHistory.Key(original.Id), revised);
+        if (changes.Length != 2 || first.Search("").Single().Text != "编辑后\n第二行")
+            throw new Exception("Edit did not replace the original");
+        second.Apply(original, false);
+        foreach (Frame change in changes) Receive(second, change);
+        first = new ClipHistory(Path.Combine(args[0], "first"));
+        foreach (Frame replay in first.Replay()) Receive(second, replay);
+        second.Apply(original, false);
+        if (second.Search("完全相同").Any() || second.Search("第二行").Single().Key != ClipHistory.Key(revised.Id))
+            throw new Exception("History edit did not survive replay");
+        if (first.Edit(ClipHistory.Key(original.Id), revised).Length != 0)
+            throw new Exception("A stale editor recreated a removed entry");
+        Console.WriteLine("PASS: edit replaces the old ID and survives offline replay");
     }
 
     static void Receive(ClipHistory history, Frame frame)

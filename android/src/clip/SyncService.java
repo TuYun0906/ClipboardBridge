@@ -130,17 +130,36 @@ public final class SyncService extends Service {
         worker.post(() -> record(ClipHistory.tombstone(entry.key), true));
     }
 
+    void editHistory(ClipHistory.Entry entry, String text, java.util.function.Consumer<String> callback) {
+        worker.post(() -> {
+            String error;
+            try {
+                java.util.List<Wire.Frame> changes = history.edit(entry.key, clipboard.makeFrame(text));
+                publishHistory(changes, true);
+                error = changes.isEmpty() ? "这条记录已更新或删除" : null;
+            } catch (IOException failure) {
+                android.util.Log.w("ClipHistory", "History edit failed", failure);
+                error = "无法保存这条记录";
+            }
+            String result = error;
+            main.post(() -> callback.accept(result));
+        });
+    }
+
     private void record(Wire.Frame frame, boolean local) {
         try {
-            java.util.List<Wire.Frame> changes = history.apply(frame, local);
-            SyncClient target = client;
-            if (target != null)
-                for (Wire.Frame change : changes)
-                    if (local || change.kind == Wire.DELETE) target.publish(change);
-            if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
+            publishHistory(history.apply(frame, local), local);
         } catch (IOException error) {
             android.util.Log.w("ClipHistory", "History write failed", error);
         }
+    }
+
+    private void publishHistory(java.util.List<Wire.Frame> changes, boolean local) {
+        SyncClient target = client;
+        if (target != null)
+            for (Wire.Frame change : changes)
+                if (local || change.kind == Wire.DELETE) target.publish(change);
+        if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
     }
 
     void copyHistory(ClipHistory.Entry entry) {

@@ -89,6 +89,19 @@ internal sealed class ClipHistory
         }
     }
 
+    internal Frame[] Edit(string key, Frame replacement)
+    {
+        lock (entries)
+        {
+            Entry previous;
+            if (!entries.TryGetValue(key, out previous) || previous.Kind != Wire.Text ||
+                previous.Text == Encoding.UTF8.GetString(replacement.Data)) return new Frame[0];
+            var changes = new List<Frame>(Apply(replacement, true));
+            if (Delete(key)) changes.Add(Tombstone(key));
+            return changes.ToArray();
+        }
+    }
+
     internal Entry[] Search(string query)
     {
         lock (entries)

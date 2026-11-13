@@ -61,7 +61,12 @@ internal sealed class Program : IDisposable
             {
                 string directory = Path.Combine(Environment.GetFolderPath(
                     Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
-                using (var program = new Program(app, directory, args.Contains("--startup"))) app.Run();
+                bool startHidden = args.Contains("--startup");
+                using (var program = new Program(app, directory, startHidden))
+                {
+                    if (!startHidden) InheritStartup();
+                    app.Run();
+                }
             }
             catch (Exception error)
             {
@@ -130,14 +135,34 @@ internal sealed class Program : IDisposable
         get
         {
             using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(StartupKey))
-                return key != null && String.Equals(key.GetValue(StartupName) as string,
-                    StartupCommand, StringComparison.OrdinalIgnoreCase);
+                return key != null && !String.IsNullOrWhiteSpace(key.GetValue(StartupName) as string);
         }
     }
 
     private static string StartupCommand
     {
         get { return "\"" + System.Reflection.Assembly.GetExecutingAssembly().Location + "\" --startup"; }
+    }
+
+    private static void InheritStartup()
+    {
+        try
+        {
+            using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(StartupKey, true))
+            {
+                if (key == null) return;
+                string previous = key.GetValue(StartupName) as string;
+                if (!String.IsNullOrWhiteSpace(previous) &&
+                    !String.Equals(previous, StartupCommand, StringComparison.OrdinalIgnoreCase))
+                    key.SetValue(StartupName, StartupCommand, Microsoft.Win32.RegistryValueKind.String);
+            }
+        }
+        catch (Exception error)
+        {
+            if (!(error is IOException) && !(error is UnauthorizedAccessException) &&
+                !(error is System.Security.SecurityException)) throw;
+            MessageBox.Show(error.Message, "无法继承开机自启设置", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     internal static void SaveStartup(bool enabled)
@@ -161,22 +186,36 @@ internal sealed class Program : IDisposable
         catch (Exception error) { SetStatus("复制失败：" + error.Message); }
     }
 
-    private void Record(Frame frame, bool local)
+    internal Task<bool> EditHistory(string key, string text)
+    {
+        return Task.Factory.StartNew(() =>
+        {
+            Frame[] changes = History.Edit(key, WindowsClipboard.ToFrame(text));
+            SyncServer target = server;
+            PublishHistory(changes, target == null ? (Action<Frame>)null : target.Publish);
+            return changes.Length != 0;
+        }, CancellationToken.None, TaskCreationOptions.None, encoding);
+    }
+
+    private void Record(Frame frame, bool local, Action<Frame> relay = null)
     {
         try
         {
-            Frame[] changes = History.Apply(frame, local);
             SyncServer target = server;
-            if (target != null)
-                foreach (Frame change in changes)
-                    if (local || change.Kind == Wire.Delete) target.Publish(change);
-            if (changes.Length > 0) app.Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (HistoryChanged != null) HistoryChanged();
-            }));
+            PublishHistory(History.Apply(frame, local), local && target != null ? target.Publish : relay);
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private void PublishHistory(Frame[] changes, Action<Frame> publish)
+    {
+        if (publish != null)
+            foreach (Frame change in changes) publish(change);
+        if (changes.Length > 0) app.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (HistoryChanged != null) HistoryChanged();
+        }));
     }
 
     internal void CopyPairingCode()
@@ -211,13 +250,13 @@ internal sealed class Program : IDisposable
         }, CancellationToken.None, TaskCreationOptions.None, encoding);
     }
 
-    private void Receive(Frame frame)
+    private void Receive(Frame frame, Action<Frame> relay)
     {
         if (frame.Kind >= Wire.HistoryText)
         {
             if (frame.Kind == Wire.HistoryText || frame.Kind == Wire.HistoryImage)
                 frame = new Frame(frame.Kind == Wire.HistoryText ? Wire.Text : Wire.Image, frame.Id, frame.Data);
-            Record(frame, false);
+            Record(frame, false, relay);
             return;
         }
         DataObject value;
@@ -228,7 +267,7 @@ internal sealed class Program : IDisposable
             try
             {
                 app.Dispatcher.Invoke(new Action(() => Clipboard.SetDataObject(value, false)));
-                if (frame.Kind == Wire.Text) Record(frame, false);
+                if (frame.Kind == Wire.Text) Record(frame, false, relay);
                 return;
             }
             catch (ExternalException) { Thread.Sleep(45); }

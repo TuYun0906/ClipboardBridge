@@ -10,31 +10,34 @@ using System.Threading;
 
 internal sealed class SyncServer : IDisposable
 {
+    private const int MaxPairingAttempts = 16;
     private readonly TcpListener listener;
     private readonly Identity identity;
-    private readonly Action<Frame> receive;
+    private readonly Action<Frame, Action<Frame>> receive;
     private readonly Action<bool> status;
-    private readonly object gate = new object();
-    private bool closed, writing;
-    private TcpClient socket;
-    private TlsLink link;
-    private Frame pending, sent;
-    private readonly Queue<Frame> history = new Queue<Frame>();
     private readonly Func<IEnumerable<Frame>> replay;
-    private bool replayNeeded;
+    private readonly object gate = new object();
+    private readonly object clipboardGate = new object();
+    private readonly HashSet<Peer> peers = new HashSet<Peer>();
+    private readonly Queue<string> appliedOrder = new Queue<string>();
+    private readonly HashSet<string> applied = new HashSet<string>();
+    private bool closed;
+    private int connected;
+    private Frame pending;
 
-    internal void Publish(Frame frame)
+    private sealed class Peer
     {
-        lock (gate)
-        {
-            if (closed || link == null) return;
-            history.Enqueue(frame);
-            ScheduleWrite();
-        }
-    }
-    private byte[] lastApplied;
+        internal readonly TcpClient Socket;
+        internal readonly Queue<Frame> History = new Queue<Frame>();
+        internal TlsLink Link;
+        internal Frame Pending, Sent;
+        internal bool Writing, ReplayNeeded;
 
-    internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame> receive, Action<bool> status, Func<IEnumerable<Frame>> replay = null)
+        internal Peer(TcpClient socket) { Socket = socket; }
+    }
+
+    internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame, Action<Frame>> receive,
+        Action<bool> status, Func<IEnumerable<Frame>> replay = null)
     {
         this.identity = identity;
         this.receive = receive;
@@ -47,132 +50,171 @@ internal sealed class SyncServer : IDisposable
     {
         listener.Start(4);
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        new Thread(ReadLoop) { IsBackground = true, Name = "Clipboard receive" }.Start();
+        new Thread(AcceptLoop) { IsBackground = true, Name = "Clipboard listener" }.Start();
         return port;
     }
 
-    internal void Submit(Frame frame)
+    internal void Publish(Frame frame) { Publish(frame, null); }
+
+    private void Publish(Frame frame, Peer origin)
     {
         lock (gate)
         {
             if (closed) return;
-            pending = frame;
-            ScheduleWrite();
-        }
-    }
-
-    private void ReadLoop()
-    {
-        while (!IsClosed())
-        {
-            bool connected = false;
-            TcpClient incoming = null;
-            try
+            foreach (Peer peer in peers)
             {
-                incoming = listener.AcceptTcpClient();
-                lock (gate)
-                {
-                    if (closed) return;
-                    socket = incoming;
-                }
-                using (TlsLink current = TlsLink.Accept(incoming, identity.Certificate, identity.Key))
-                {
-                    lock (gate)
-                    {
-                        if (closed) return;
-                        link = current;
-                        sent = null;
-                        replayNeeded = replay != null;
-                        ScheduleWrite();
-                    }
-                    connected = true;
-                    status(true);
-                    for (Frame frame; !IsClosed() && (frame = current.Read()) != null;)
-                    {
-                        if (frame.Kind == Wire.Ack)
-                        {
-                            lock (gate)
-                                if (pending != null && pending.Id.SequenceEqual(frame.Id)) pending = null;
-                        }
-                        else
-                        {
-                            if (frame.Kind < Wire.Text || frame.Kind > Wire.Delete)
-                                throw new IOException("Unexpected message");
-                            if (frame.Kind >= Wire.HistoryText || lastApplied == null || !lastApplied.SequenceEqual(frame.Id))
-                            {
-                                receive(frame);
-                                if (frame.Kind < Wire.HistoryText) lastApplied = frame.Id;
-                            }
-                            if (frame.Kind < Wire.HistoryText) current.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
-                        }
-                    }
-                }
-            }
-            catch (IOException) { }
-            catch (SocketException) { }
-            catch (AuthenticationException) { }
-            catch (Win32Exception) { }
-            catch (ObjectDisposedException) { }
-            finally
-            {
-                if (incoming != null) incoming.Close();
-                lock (gate)
-                {
-                    socket = null;
-                    link = null;
-                    history.Clear();
-                }
-                if (connected && !IsClosed()) status(false);
+                if (peer.Link == null || peer == origin) continue;
+                peer.History.Enqueue(frame);
+                ScheduleWrite(peer);
             }
         }
     }
 
-    private bool IsClosed() { lock (gate) return closed; }
+    internal void Submit(Frame frame) { Submit(frame, null); }
 
-    private void ScheduleWrite()
-    {
-        if (closed || writing || link == null || (history.Count == 0 && !replayNeeded && (pending == null || pending == sent))) return;
-        writing = true;
-        ThreadPool.QueueUserWorkItem(delegate { WriteLatest(); });
-    }
-
-    private void WriteLatest()
-    {
-        while (true)
-        {
-            TlsLink current;
-            Frame frame = null;
-            bool restore = false;
-            lock (gate)
-            {
-                current = link;
-                if (closed || current == null || (history.Count == 0 && !replayNeeded && (pending == null || pending == sent)))
-                {
-                    writing = false;
-                    return;
-                }
-                if (pending != null && pending != sent) { frame = pending; sent = frame; }
-                else if (replayNeeded) { restore = true; replayNeeded = false; }
-                else frame = history.Dequeue();
-            }
-            try
-            {
-                if (restore) foreach (Frame entry in replay()) current.Send(entry);
-                else current.Send(frame);
-            }
-            catch (IOException) { Drop(current); }
-            catch (ObjectDisposedException) { Drop(current); }
-        }
-    }
-
-    private void Drop(TlsLink current)
+    private void Submit(Frame frame, Peer origin)
     {
         lock (gate)
         {
-            if (link != current) return;
-            link = null;
-            if (socket != null) socket.Close();
+            if (closed) return;
+            pending = origin == null ? frame : null;
+            foreach (Peer peer in peers)
+            {
+                if (peer.Link == null || peer == origin) continue;
+                peer.Pending = frame;
+                ScheduleWrite(peer);
+            }
         }
+    }
+
+    private void AcceptLoop()
+    {
+        while (true)
+        {
+            TcpClient incoming;
+            try { incoming = listener.AcceptTcpClient(); }
+            catch (SocketException) { return; }
+            catch (ObjectDisposedException) { return; }
+            catch (InvalidOperationException) { return; }
+            lock (gate)
+            {
+                if (closed || peers.Count - connected >= MaxPairingAttempts)
+                {
+                    incoming.Close();
+                    if (closed) return;
+                    continue;
+                }
+                var peer = new Peer(incoming);
+                peers.Add(peer);
+                new Thread(() => ReadPeer(peer)) { IsBackground = true, Name = "Clipboard receive" }.Start();
+            }
+        }
+    }
+
+    private void ReadPeer(Peer peer)
+    {
+        try
+        {
+            using (TlsLink link = TlsLink.Accept(peer.Socket, identity.Certificate, identity.Key))
+            {
+                lock (gate)
+                {
+                    if (closed) return;
+                    peer.Link = link;
+                    peer.Pending = pending;
+                    peer.ReplayNeeded = replay != null;
+                    ScheduleWrite(peer);
+                    if (++connected == 1) status(true);
+                }
+                Action<Frame> relay = change => Publish(change, change.Kind == Wire.Delete ? null : peer);
+                for (Frame frame; (frame = link.Read()) != null;)
+                {
+                    if (frame.Kind == Wire.Ack)
+                    {
+                        lock (gate)
+                        {
+                            if (peer.Sent == null || !peer.Sent.Id.SequenceEqual(frame.Id)) continue;
+                            if (peer.Pending == peer.Sent) peer.Pending = null;
+                            if (pending == peer.Sent) pending = null;
+                        }
+                    }
+                    else if (frame.Kind >= Wire.HistoryText && frame.Kind <= Wire.Delete) receive(frame, relay);
+                    else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
+                    {
+                        ApplyClipboard(frame, peer, relay);
+                        link.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
+                    }
+                    else throw new IOException("Unexpected message");
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (SocketException) { }
+        catch (AuthenticationException) { }
+        catch (Win32Exception) { }
+        catch (ObjectDisposedException) { }
+        finally
+        {
+            peer.Socket.Close();
+            lock (gate)
+            {
+                peers.Remove(peer);
+                if (peer.Link != null && --connected == 0 && !closed) status(false);
+                peer.Link = null;
+                peer.History.Clear();
+            }
+        }
+    }
+
+    private void ApplyClipboard(Frame frame, Peer peer, Action<Frame> relay)
+    {
+        string id = Convert.ToBase64String(frame.Id);
+        lock (clipboardGate)
+        {
+            if (applied.Contains(id)) return;
+            receive(frame, relay);
+            applied.Add(id);
+            appliedOrder.Enqueue(id);
+            if (appliedOrder.Count > 128) applied.Remove(appliedOrder.Dequeue());
+            Submit(frame, peer);
+        }
+    }
+
+    private void ScheduleWrite(Peer peer)
+    {
+        if (peer.Writing) return;
+        peer.Writing = true;
+        ThreadPool.QueueUserWorkItem(delegate { WriteLatest(peer); });
+    }
+
+    private void WriteLatest(Peer peer)
+    {
+        try
+        {
+            while (true)
+            {
+                TlsLink link;
+                Frame frame = null;
+                lock (gate)
+                {
+                    link = peer.Link;
+                    if (closed || link == null ||
+                        (!peer.ReplayNeeded && peer.History.Count == 0 && (peer.Pending == null || peer.Pending == peer.Sent)))
+                    {
+                        peer.Writing = false;
+                        return;
+                    }
+                    if (peer.Pending != null && peer.Pending != peer.Sent) frame = peer.Sent = peer.Pending;
+                    else if (peer.ReplayNeeded) peer.ReplayNeeded = false;
+                    else frame = peer.History.Dequeue();
+                }
+                if (frame == null)
+                    foreach (Frame entry in replay()) link.Send(entry);
+                else link.Send(frame);
+            }
+        }
+        catch (IOException) { peer.Socket.Close(); }
+        catch (ObjectDisposedException) { peer.Socket.Close(); }
     }
 
     public void Dispose()
@@ -182,7 +224,7 @@ internal sealed class SyncServer : IDisposable
             if (closed) return;
             closed = true;
             listener.Stop();
-            if (socket != null) socket.Close();
+            foreach (Peer peer in peers) peer.Socket.Close();
             pending = null;
         }
     }

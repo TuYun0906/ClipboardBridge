@@ -76,6 +76,7 @@ internal sealed class MainWindow : Window
         body.Children.Add(searchRow);
 
         var items = new ListBox { BorderBrush = BorderColor };
+        ScrollViewer.SetHorizontalScrollBarVisibility(items, ScrollBarVisibility.Disabled);
         Grid.SetRow(items, 3);
         body.Children.Add(items);
         Action refresh = () =>

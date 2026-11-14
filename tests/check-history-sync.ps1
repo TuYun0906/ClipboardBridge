@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $build = New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot ("history-build-" + [guid]::NewGuid().ToString("N")))
 $exe = Join-Path $build.FullName 'HistorySyncServerCheck.exe'
-$windows = 'tests/HistorySyncServerCheck.cs', 'windows/SyncServer.cs', 'windows/Identity.cs',
+$windows = 'tests/HistorySyncServerCheck.cs', 'windows/SyncServer.cs', 'windows/SyncClient.cs', 'windows/Identity.cs',
     'windows/TlsLink.cs', 'windows/Wire.cs', 'windows/ClipHistory.cs' |
     ForEach-Object { (Resolve-Path (Join-Path $root $_)).Path }
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /codepage:65001 "/out:$exe" /r:System.Security.dll $windows

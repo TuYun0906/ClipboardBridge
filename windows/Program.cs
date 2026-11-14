@@ -26,7 +26,7 @@ internal sealed class Program : IDisposable
     private readonly Icon trayIcon;
     private readonly WindowsClipboard clipboard;
     private readonly TaskScheduler encoding = new ConcurrentExclusiveSchedulerPair().ExclusiveScheduler;
-    private volatile SyncServer server;
+    private volatile ISyncConnection connection;
     private IPAddress address;
     private bool disposed;
     private bool exiting;
@@ -41,6 +41,9 @@ internal sealed class Program : IDisposable
 
     internal bool Automatic { get; private set; }
     internal bool PublicMode { get; private set; }
+    internal string RemoteAddress { get; private set; }
+    internal string RemoteCode { get; private set; }
+    internal bool ClientMode { get; private set; }
     internal bool ShowWindow { get; private set; }
     internal string AddressText { get { return address == null ? "暂无可用地址" : address.ToString(); } }
     internal string Status { get; private set; }
@@ -81,6 +84,11 @@ internal sealed class Program : IDisposable
         settingsPath = Path.Combine(directory, "settings.txt");
         identity = Identity.Open(Path.Combine(directory, "identity.bin"));
         string options = File.Exists(settingsPath) ? File.ReadAllText(settingsPath) : "001";
+        string[] lines = options.Replace("\r", "").Split('\n');
+        ClientMode = lines.Length >= 4 && lines[1] == "client";
+        RemoteAddress = lines.Length >= 4 ? lines[2] : "";
+        string encoded = lines.Length >= 4 ? lines[3] : "";
+        RemoteCode = encoded == "" ? "" : ReadRemoteCode(encoded);
         Automatic = options.Length > 0 && options[0] == '1';
         PublicMode = options.Length > 1 && options[1] == '1';
         ShowWindow = !startHidden;
@@ -104,9 +112,26 @@ internal sealed class Program : IDisposable
         if (ShowWindow) window.Show();
     }
 
-    internal void SaveSettings(bool automatic, bool publicMode, bool visible, bool saveImages = false)
+    private static string ReadRemoteCode(string value)
     {
-        bool changed = PublicMode != publicMode;
+        try
+        {
+            var bytes = System.Security.Cryptography.ProtectedData.Unprotect(Convert.FromBase64String(value),
+                null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+            return System.Text.Encoding.UTF8.GetString(bytes);
+        }
+        catch (FormatException) { return ""; }
+        catch (System.Security.Cryptography.CryptographicException) { return ""; }
+    }
+
+    internal void SaveSettings(bool automatic, bool publicMode, bool visible, bool saveImages = false,
+        bool clientMode = false, string remoteAddress = "", string remoteCode = "")
+    {
+        bool changed = PublicMode != publicMode || ClientMode != clientMode ||
+            RemoteAddress != remoteAddress || RemoteCode != remoteCode;
+        ClientMode = clientMode;
+        RemoteAddress = remoteAddress;
+        RemoteCode = remoteCode;
         Automatic = automatic;
         PublicMode = publicMode;
         History.SaveImages = saveImages;
@@ -114,11 +139,16 @@ internal sealed class Program : IDisposable
         if (changed) Listen(true);
         try
         {
+            string encoded = RemoteCode == "" ? "" : Convert.ToBase64String(
+                System.Security.Cryptography.ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(RemoteCode),
+                    null, System.Security.Cryptography.DataProtectionScope.CurrentUser));
             File.WriteAllText(settingsPath, (Automatic ? "1" : "0") + (PublicMode ? "1" : "0") +
-                "1" + (History.SaveImages ? "1" : "0"));
+                "1" + (History.SaveImages ? "1" : "0") + "\n" + (ClientMode ? "client" : "host") +
+                "\n" + RemoteAddress + "\n" + encoded);
         }
         catch (IOException) { SetStatus("无法保存设置"); }
         catch (UnauthorizedAccessException) { SetStatus("无法保存设置"); }
+        catch (System.Security.Cryptography.CryptographicException) { SetStatus("无法保存连接设置"); }
     }
 
     internal void SetVisible(bool visible)
@@ -191,7 +221,7 @@ internal sealed class Program : IDisposable
         return Task.Factory.StartNew(() =>
         {
             Frame[] changes = History.Edit(key, WindowsClipboard.ToFrame(text));
-            SyncServer target = server;
+            ISyncConnection target = connection;
             PublishHistory(changes, target == null ? (Action<Frame>)null : target.Publish);
             return changes.Length != 0;
         }, CancellationToken.None, TaskCreationOptions.None, encoding);
@@ -201,7 +231,7 @@ internal sealed class Program : IDisposable
     {
         try
         {
-            SyncServer target = server;
+            ISyncConnection target = connection;
             PublishHistory(History.Apply(frame, local), local && target != null ? target.Publish : relay);
         }
         catch (IOException) { }
@@ -234,7 +264,7 @@ internal sealed class Program : IDisposable
 
     private void QueueContent(object content, bool send)
     {
-        SyncServer target = send ? server : null;
+        ISyncConnection target = send ? connection : null;
         Task.Factory.StartNew(delegate
         {
             try
@@ -280,9 +310,29 @@ internal sealed class Program : IDisposable
     private void Listen(bool force)
     {
         IPAddress selected = SelectAddress(PublicMode);
-        if (!force && Equals(selected, address) && server != null) return;
-        if (server != null) server.Dispose();
-        server = null;
+        if (!force && (ClientMode || Equals(selected, address)) && connection != null) return;
+        if (connection != null) connection.Dispose();
+        connection = null;
+        if (ClientMode)
+        {
+            Uri endpoint;
+            byte[] credentials;
+            if (!SyncClient.TryEndpoint(RemoteAddress, out endpoint) || !SyncClient.TryPairing(RemoteCode, out credentials))
+            {
+                SetStatus("请在设置中填写 Android 地址和配对码");
+                return;
+            }
+            SyncClient client = null;
+            client = new SyncClient(endpoint, credentials, Receive, connected =>
+                app.Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (connection == client) SetStatus(connected ? "已连接到 Android 主机" : "正在连接 Android 主机…");
+                })), History.Replay);
+            connection = client;
+            SetStatus("正在连接 Android 主机…");
+            client.Start();
+            return;
+        }
         address = selected;
         if (address == null && PublicMode)
         {
@@ -295,16 +345,16 @@ internal sealed class Program : IDisposable
             next = new SyncServer(address ?? IPAddress.Loopback, Port, identity, Receive, connected =>
                 app.Dispatcher.BeginInvoke(new Action(delegate
                 {
-                    if (server == next) SetStatus(connected ? "已连接" : "等待手机连接");
+                    if (connection == next) SetStatus(connected ? "已连接" : "等待手机连接");
                 })), History.Replay, includeLoopback: !PublicMode);
-            server = next;
+            connection = next;
             next.Start();
             SetStatus("等待手机连接");
         }
         catch (SocketException)
         {
             if (next != null) next.Dispose();
-            server = null;
+            connection = null;
             SetStatus("无法监听同步端口");
         }
     }
@@ -351,7 +401,7 @@ internal sealed class Program : IDisposable
     {
         disposed = true;
         NetworkChange.NetworkAddressChanged -= NetworkChanged;
-        if (server != null) server.Dispose();
+        if (connection != null) connection.Dispose();
         clipboard.Dispose();
         tray.Visible = false;
         tray.ContextMenuStrip.Dispose();

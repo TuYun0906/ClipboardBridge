@@ -16,6 +16,7 @@ internal sealed class MainWindow : Window
     private static readonly Brush Tint = Brush(234, 240, 255);
     private static readonly Brush BorderColor = Brush(222, 229, 239);
     private static readonly FontFamily UiFont = new FontFamily("Microsoft YaHei UI, Segoe UI");
+    private static readonly ControlTemplate HistoryItemTemplate = CreateHistoryItemTemplate();
     private readonly Program program;
     private TextBlock status;
     private Window settings;
@@ -27,10 +28,10 @@ internal sealed class MainWindow : Window
         this.program = program;
         Title = "跨设备剪贴板";
         FontFamily = UiFont;
-        Width = 560;
-        Height = 530;
+        Width = 600;
+        Height = 590;
         MinWidth = 385;
-        MinHeight = 330;
+        MinHeight = 380;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Icon = program.WindowIcon;
         Content = Panel();
@@ -49,18 +50,23 @@ internal sealed class MainWindow : Window
 
     private Border Panel()
     {
-        var body = new Grid { Margin = new Thickness(22) };
-        for (int i = 0; i < 5; i++) body.RowDefinitions.Add(new RowDefinition {
-            Height = i == 4 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto
-        });
-        status = Label("", 14, Muted, false);
+        var body = new Grid { Margin = new Thickness(20) };
+        body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        body.RowDefinitions.Add(new RowDefinition());
+        status = Label("", 13, Muted, false);
         var statusRow = new DockPanel();
-        var help = new Button { Content = "如何上手", Foreground = Blue, Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0), Padding = new Thickness(8, 0, 0, 0), Cursor = Cursors.Hand };
-        help.Click += (sender, args) => OpenHelp();
+        var help = Action("如何上手", false, OpenHelp);
+        help.Width = 82;
+        help.Height = 32;
+        help.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(help, Dock.Right);
         statusRow.Children.Add(help);
-        statusRow.Children.Add(status);
+        var identity = new StackPanel();
+        identity.Children.Add(Label("跨设备剪贴板", 24, Ink, true));
+        status.Margin = new Thickness(0, 5, 0, 0);
+        identity.Children.Add(status);
+        statusRow.Children.Add(identity);
         body.Children.Add(statusRow);
         RefreshStatus();
 
@@ -72,22 +78,33 @@ internal sealed class MainWindow : Window
         Grid.SetRow(actions, 1);
         body.Children.Add(actions);
 
+        var history = new Grid();
+        history.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        history.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        history.RowDefinitions.Add(new RowDefinition());
+        var historyCard = new Border { CornerRadius = new CornerRadius(20),
+            Padding = new Thickness(14), Background = Brushes.White, Child = history };
+        Grid.SetRow(historyCard, 2);
+        body.Children.Add(historyCard);
         var searchRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
         var heading = Label("剪贴板历史", 16, Ink, true);
         heading.Margin = new Thickness(0, 0, 14, 0);
         heading.VerticalAlignment = VerticalAlignment.Center;
         searchRow.Children.Add(heading);
-        var type = new ComboBox { Width = 67, Height = 32, Margin = new Thickness(8, 0, 0, 0),
-            ItemsSource = new[] { "全部", "文字", "图片" }, SelectedIndex = 0 };
-        System.Windows.Automation.AutomationProperties.SetName(type, "历史类型");
+        byte? kind = null;
+        var type = Action("全部", false, () => { });
+        type.Width = 67;
+        type.Height = 34;
+        type.Margin = new Thickness(8, 0, 0, 0);
+        type.ToolTip = "点击切换历史类型";
         DockPanel.SetDock(type, Dock.Right);
         searchRow.Children.Add(type);
-        var search = new TextBox { Height = 32, Padding = new Thickness(8, 4, 8, 4),
-            ToolTip = "搜索历史文字或图片" };
+        var search = new TextBox { Height = 34, Padding = new Thickness(8, 4, 8, 4),
+            VerticalContentAlignment = VerticalAlignment.Center, BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent, Foreground = Ink, ToolTip = "搜索历史文字或图片" };
         System.Windows.Automation.AutomationProperties.SetName(search, "搜索历史");
-        searchRow.Children.Add(search);
-        Grid.SetRow(searchRow, 2);
-        body.Children.Add(searchRow);
+        searchRow.Children.Add(new Border { Background = BackgroundColor, CornerRadius = new CornerRadius(10), Child = search });
+        history.Children.Add(searchRow);
 
         var dates = new Grid { Margin = new Thickness(0, 0, 0, 8) };
         dates.ColumnDefinitions.Add(new ColumnDefinition());
@@ -106,13 +123,14 @@ internal sealed class MainWindow : Window
         clearDates.Height = 32;
         clearDates.VerticalAlignment = VerticalAlignment.Bottom;
         AddAction(dates, 2, clearDates);
-        Grid.SetRow(dates, 3);
-        body.Children.Add(dates);
+        Grid.SetRow(dates, 1);
+        history.Children.Add(dates);
 
-        var items = new ListBox { BorderBrush = BorderColor };
+        var items = new ListBox { BorderThickness = new Thickness(0), Background = Brushes.Transparent };
         ScrollViewer.SetHorizontalScrollBarVisibility(items, ScrollBarVisibility.Disabled);
-        Grid.SetRow(items, 4);
-        body.Children.Add(items);
+        ScrollViewer.SetCanContentScroll(items, false);
+        Grid.SetRow(items, 2);
+        history.Children.Add(items);
         Action refresh = () =>
         {
             items.Items.Clear();
@@ -121,7 +139,6 @@ internal sealed class MainWindow : Window
                 items.Items.Add(Label("结束日期须在开始日期当天或之后", 14, Muted, false));
                 return;
             }
-            byte? kind = type.SelectedIndex == 1 ? Wire.Text : type.SelectedIndex == 2 ? Wire.Image : (byte?)null;
             foreach (var entry in program.History.Search(search.Text, from.SelectedDate, through.SelectedDate, kind))
             {
                 var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 48 };
@@ -150,7 +167,8 @@ internal sealed class MainWindow : Window
                 time.Margin = new Thickness(0, 3, 0, 0);
                 details.Children.Add(time);
                 row.Children.Add(details);
-                var item = new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+                var item = new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                    Margin = new Thickness(0, 0, 0, 6), Template = HistoryItemTemplate };
                 item.ToolTip = "双击预览";
                 item.MouseDoubleClick += (sender, args) =>
                 {
@@ -163,7 +181,12 @@ internal sealed class MainWindow : Window
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
         };
         search.TextChanged += (sender, args) => refresh();
-        type.SelectionChanged += (sender, args) => refresh();
+        type.Click += (sender, args) =>
+        {
+            kind = !kind.HasValue ? Wire.Text : kind.Value == Wire.Text ? Wire.Image : (byte?)null;
+            type.Content = kind == Wire.Text ? "文字" : kind == Wire.Image ? "图片" : "全部";
+            refresh();
+        };
         from.SelectedDateChanged += (sender, args) => refresh();
         through.SelectedDateChanged += (sender, args) => refresh();
         program.HistoryChanged += refresh;
@@ -172,12 +195,61 @@ internal sealed class MainWindow : Window
         return new Border { Background = BackgroundColor, Child = body };
     }
 
+    private static ControlTemplate CreateHistoryItemTemplate()
+    {
+        var surface = new FrameworkElementFactory(typeof(Border), "Card");
+        surface.SetValue(Border.CornerRadiusProperty, new CornerRadius(12));
+        surface.SetValue(Border.BackgroundProperty, BackgroundColor);
+        surface.SetValue(Border.PaddingProperty, new Thickness(4));
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+        surface.AppendChild(content);
+        var template = new ControlTemplate(typeof(ListBoxItem)) { VisualTree = surface };
+        var selected = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
+        selected.Setters.Add(new Setter(Border.BackgroundProperty, Tint, "Card"));
+        template.Triggers.Add(selected);
+        return template;
+    }
+
     private static DatePicker HistoryDatePicker(string label)
     {
-        var picker = new DatePicker { Height = 32 };
+        var picker = new DatePicker { Height = 34, Foreground = Ink,
+            Template = DateFieldTemplate };
         System.Windows.Automation.AutomationProperties.SetName(picker, label);
         return picker;
     }
+
+    private static readonly ControlTemplate DateFieldTemplate =
+        (ControlTemplate)System.Windows.Markup.XamlReader.Parse(
+            @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
+                xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""DatePicker"">
+                <Border Background=""#F6F7FA"" CornerRadius=""10"">
+                    <Grid x:Name=""PART_Root"">
+                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width=""34""/></Grid.ColumnDefinitions>
+                        <DatePickerTextBox x:Name=""PART_TextBox"" Margin=""7,0,0,0"" Background=""Transparent""
+                            BorderThickness=""0"" VerticalAlignment=""Center"" Foreground=""#222936"" FontSize=""13""/>
+                        <Button x:Name=""PART_Button"" Grid.Column=""1"" Margin=""2"" Background=""#EAF0FF""
+                            Cursor=""Hand"" AutomationProperties.Name=""打开日历"">
+                            <Button.Template>
+                                <ControlTemplate TargetType=""Button"">
+                                    <Border x:Name=""IconSurface"" CornerRadius=""8"" Background=""{TemplateBinding Background}"">
+                                        <Path Width=""16"" Height=""16"" Stretch=""Uniform"" Stroke=""#3368EA""
+                                            StrokeThickness=""1.5"" StrokeStartLineCap=""Round"" StrokeEndLineCap=""Round""
+                                            StrokeLineJoin=""Round"" HorizontalAlignment=""Center"" VerticalAlignment=""Center""
+                                            Data=""M 2,4 L 14,4 Q 15,4 15,5 L 15,14 Q 15,15 14,15 L 2,15 Q 1,15 1,14 L 1,5 Q 1,4 2,4 Z M 1,8 L 15,8 M 5,2 L 5,5 M 11,2 L 11,5 M 5,11 L 7,11""/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property=""IsMouseOver"" Value=""True""><Setter TargetName=""IconSurface"" Property=""Background"" Value=""#DCE7FF""/></Trigger>
+                                        <Trigger Property=""IsPressed"" Value=""True""><Setter TargetName=""IconSurface"" Property=""Background"" Value=""#CEDFFF""/></Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <Popup x:Name=""PART_Popup"" Placement=""Bottom"" PlacementTarget=""{Binding ElementName=PART_Root}""
+                            StaysOpen=""False"" AllowsTransparency=""True""/>
+                    </Grid>
+                </Border>
+            </ControlTemplate>");
 
     private static StackPanel HistoryDateField(string label, DatePicker picker)
     {
@@ -194,6 +266,7 @@ internal sealed class MainWindow : Window
         dialog.Height = Math.Min(580, SystemParameters.WorkArea.Height - 40);
         var body = DialogBody();
         AddHelpSection(body, "局域网配对", "让电脑和安卓设备连接同一个局域网。在电脑「设置」查看地址并复制配对码，再到安卓端填写地址和配对码，点「保存连接」。");
+        AddHelpSection(body, "Android 当主机", "两端连接同一个 Wi-Fi。在 Android 打开「作为主机」，复制配对码。在 Windows「设置」勾选「连接到 Android 主机」，填写 Android 显示的地址和配对码，然后保存。");
         AddHelpSection(body, "Android 后台同步", "先安装并启动 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         AddHelpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         AddHelpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络。在电脑开启公网模式并保存，记下显示的 Tailscale 地址。安卓端也切到公网模式，填写这个地址和原来的配对码，再保存连接。");
@@ -390,8 +463,12 @@ internal sealed class MainWindow : Window
         dialog.Closed += (sender, args) => settings = null;
         var body = DialogBody();
         body.Children.Add(Label("连接", 20, Ink, true));
+        var clientMode = Check("连接到 Android 主机", program.ClientMode);
+        body.Children.Add(clientMode);
+        var desktop = new StackPanel();
+        body.Children.Add(desktop);
         var publicMode = Check("使用 Tailscale 监听", program.PublicMode);
-        body.Children.Add(publicMode);
+        desktop.Children.Add(publicMode);
         var address = new TextBox
         {
             Text = program.AddressText, IsReadOnly = true, Foreground = Ink, Background = BackgroundColor,
@@ -401,7 +478,7 @@ internal sealed class MainWindow : Window
             ? program.AddressText : "保存后查看公网地址";
         publicMode.Unchecked += (sender, args) => address.Text = publicMode.IsChecked == program.PublicMode
             ? program.AddressText : "保存后查看局域网地址";
-        body.Children.Add(address);
+        desktop.Children.Add(address);
         Button pair = null;
         pair = Action("复制配对码", false, () =>
         {
@@ -409,7 +486,26 @@ internal sealed class MainWindow : Window
             pair.Content = "配对码已复制";
         });
         pair.Height = 40;
-        body.Children.Add(pair);
+        desktop.Children.Add(pair);
+        var mobile = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
+        body.Children.Add(mobile);
+        mobile.Children.Add(Label("Android 主机地址（可加端口）", 13, Muted, false));
+        var remote = new TextBox { Text = program.RemoteAddress, Padding = new Thickness(9, 6, 9, 6),
+            Margin = new Thickness(0, 3, 0, 8), BorderBrush = BorderColor };
+        mobile.Children.Add(remote);
+        mobile.Children.Add(Label("Android 主机配对码", 13, Muted, false));
+        var code = new PasswordBox { Password = program.RemoteCode, Padding = new Thickness(9, 6, 9, 6),
+            Margin = new Thickness(0, 3, 0, 0), BorderBrush = BorderColor };
+        mobile.Children.Add(code);
+        Action updateMode = () =>
+        {
+            bool connecting = clientMode.IsChecked == true;
+            mobile.Visibility = connecting ? Visibility.Visible : Visibility.Collapsed;
+            desktop.Visibility = connecting ? Visibility.Collapsed : Visibility.Visible;
+        };
+        clientMode.Checked += (sender, args) => updateMode();
+        clientMode.Unchecked += (sender, args) => updateMode();
+        updateMode();
         var automatic = Check("自动发送刚复制的内容", program.Automatic);
         var images = Check("历史记录保存图片", program.History.SaveImages);
         var startup = Check("开机自启", Program.StartWithWindows);
@@ -420,6 +516,22 @@ internal sealed class MainWindow : Window
         {
             bool auto = automatic.IsChecked == true, online = publicMode.IsChecked == true,
                 saveImages = images.IsChecked == true;
+            bool connecting = clientMode.IsChecked == true;
+            string remoteAddress = remote.Text.Trim(), remoteCode = code.Password.Trim();
+            Uri target;
+            byte[] pairing;
+            if (connecting && !SyncClient.TryEndpoint(remoteAddress, out target))
+            {
+                MessageBox.Show(dialog, "请填写 Android 显示的主机地址。", "主机地址");
+                remote.Focus();
+                return;
+            }
+            if (connecting && !SyncClient.TryPairing(remoteCode, out pairing))
+            {
+                MessageBox.Show(dialog, "请填写 Android 主机的完整配对码。", "配对码");
+                code.Focus();
+                return;
+            }
             try
             {
                 bool enabled = startup.IsChecked == true;
@@ -431,7 +543,7 @@ internal sealed class MainWindow : Window
                 return;
             }
             dialog.Close();
-            program.SaveSettings(auto, online, program.ShowWindow, saveImages);
+            program.SaveSettings(auto, online, program.ShowWindow, saveImages, connecting, remoteAddress, remoteCode);
         });
         save.Height = 43;
         save.Margin = new Thickness(0, 11, 0, 0);

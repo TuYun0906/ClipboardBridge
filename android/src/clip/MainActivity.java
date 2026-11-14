@@ -37,6 +37,7 @@ public final class MainActivity extends Activity {
     private ClipboardManager clipboard;
     private TextView status, mediaHint, authorize;
     private EditText host, pair;
+    private TextView hostAddress, hostCode;
     private Switch media, internet, auto;
     private boolean updating, configuredMode;
     private final ClipboardManager.OnPrimaryClipChangedListener clipChanges = this::captureFocused;
@@ -140,17 +141,47 @@ public final class MainActivity extends Activity {
         add(root, sending, 20, dp(48));
 
         LinearLayout connection = card(root, "连接");
-        internet = toggle(connection, "公网模式", configuredMode);
+        boolean isHost = prefs.getBoolean(Prefs.HOST, false);
+        Switch role = toggle(connection, "作为主机", isHost);
+        LinearLayout clientFields = Style.column(this);
+        add(connection, clientFields, 0, -2);
+        LinearLayout hostFields = Style.column(this);
+        add(connection, hostFields, 0, -2);
+        hostAddress = Style.label(this, "正在获取主机地址…", 15, Style.INK, true);
+        add(hostFields, hostAddress, 9, -2);
+        hostCode = Style.action(this, "复制配对码", false, () -> {
+            SyncService service = SyncService.running;
+            if (service == null || service.hostPairingCode().isEmpty()) return;
+            ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+            android.content.ClipData clip = android.content.ClipData.newPlainText(getPackageName() + ".received", service.hostPairingCode());
+            android.os.PersistableBundle extras = new android.os.PersistableBundle();
+            extras.putBoolean("android.content.extra.IS_SENSITIVE", true);
+            clip.getDescription().setExtras(extras);
+            clipboard.setPrimaryClip(clip);
+            Toast.makeText(this, "已复制配对码", Toast.LENGTH_SHORT).show();
+        });
+        add(hostFields, hostCode, 10, dp(44));
+        java.util.function.Consumer<Boolean> displayRole = enabled -> {
+            clientFields.setVisibility(enabled ? View.GONE : View.VISIBLE);
+            hostFields.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        };
+        displayRole.accept(isHost);
+        role.setOnCheckedChangeListener((button, enabled) -> {
+            displayRole.accept(enabled);
+            prefs.edit().putBoolean(Prefs.HOST, enabled).apply();
+            refreshStatus();
+        });
+        internet = toggle(clientFields, "公网模式", configuredMode);
         host = field(connectionHint(configuredMode),
                 prefs.getString(configuredMode ? Prefs.WAN : Prefs.LAN, ""));
         host.setSingleLine(true);
         host.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        add(connection, host, 7, dp(48));
-        pair = field("Windows 配对码", prefs.getString(Prefs.PAIR, ""));
+        add(clientFields, host, 7, dp(48));
+        pair = field("主机配对码", prefs.getString(Prefs.PAIR, ""));
         pair.setSingleLine(true);
         pair.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        add(connection, pair, 9, dp(48));
-        add(connection, Style.action(this, "保存连接", true, this::saveConnection), 12, dp(46));
+        add(clientFields, pair, 9, dp(48));
+        add(clientFields, Style.action(this, "保存连接", true, this::saveConnection), 12, dp(46));
         internet.setOnCheckedChangeListener((button, enabled) -> {
             prefs.edit().putString(configuredMode ? Prefs.WAN : Prefs.LAN, host.getText().toString().trim())
                     .putString(Prefs.PAIR, pair.getText().toString().trim())
@@ -292,6 +323,7 @@ public final class MainActivity extends Activity {
         LinearLayout body = Style.column(this);
         scroll.addView(body);
         helpSection(body, "局域网配对", "让电脑和安卓设备连接同一个局域网。在电脑「设置」查看地址并复制配对码，在安卓端填写两项并点「保存连接」。");
+        helpSection(body, "Android 当主机", "在同一 Wi-Fi 下开启「作为主机」，查看地址并复制配对码。Windows 在「设置」勾选「连接到 Android 主机」，或在另一台安卓设备填写这两项，然后保存。");
         helpSection(body, "Shizuku 后台同步", "安装 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可在 Shizuku 里使用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         helpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         helpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络，并都开启公网模式。把 Windows 设置中显示的 Tailscale 地址和原配对码填到安卓端，再保存连接。");
@@ -445,18 +477,11 @@ public final class MainActivity extends Activity {
         typeSize.leftMargin = dp(8);
         search.addView(type, typeSize);
         type.setOnClickListener(view -> {
-            android.widget.PopupMenu menu = new android.widget.PopupMenu(this, type);
-            menu.getMenu().add(0, 0, 0, "全部");
-            menu.getMenu().add(0, Wire.TEXT, 1, "文字");
-            menu.getMenu().add(0, Wire.IMAGE, 2, "图片");
-            menu.setOnMenuItemClickListener(item -> {
-                filter[0] = item.getItemId();
-                type.setText(item.getTitle());
-                type.setContentDescription("历史类型：" + item.getTitle());
-                resetSelection.run();
-                return true;
-            });
-            menu.show();
+            filter[0] = filter[0] == 0 ? Wire.TEXT : filter[0] == Wire.TEXT ? Wire.IMAGE : 0;
+            String name = filter[0] == Wire.TEXT ? "文字" : filter[0] == Wire.IMAGE ? "图片" : "全部";
+            type.setText(name);
+            type.setContentDescription("历史类型：" + name);
+            resetSelection.run();
         });
         cancel.setOnClickListener(view -> {
             selected.clear();
@@ -685,6 +710,12 @@ public final class MainActivity extends Activity {
 
     private void refreshStatus() {
         SyncService service = SyncService.running;
+        if (hostAddress != null && service != null && prefs.getBoolean(Prefs.HOST, false)) {
+            hostAddress.setText(service.hostAddress());
+            boolean ready = !service.hostPairingCode().isEmpty();
+            hostCode.setEnabled(ready);
+            hostCode.setAlpha(ready ? 1f : 0.5f);
+        }
         if (status != null && service != null) status.setText(service.status());
         if (auto == null || authorize == null) return;
         boolean ready = service != null && service.backgroundReady();

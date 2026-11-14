@@ -37,6 +37,19 @@ public final class SyncService extends Service {
     private BackgroundClipboard background;
     private MediaWatcher media;
     private volatile SyncClient client;
+    private volatile SyncHost host;
+    private HostIdentity hostIdentity;
+    private boolean startingHost, hosting, destroyed;
+    private final android.net.ConnectivityManager.NetworkCallback networkChanges =
+            new android.net.ConnectivityManager.NetworkCallback() {
+                @Override public void onLinkPropertiesChanged(android.net.Network network,
+                        android.net.LinkProperties properties) { notifyAddress(); }
+                @Override public void onLost(android.net.Network network) { notifyAddress(); }
+            };
+
+    private void notifyAddress() {
+        main.post(() -> { if (!destroyed && hosting) sendBroadcast(new Intent(STATUS).setPackage(getPackageName())); });
+    }
     private String endpoint;
     private String token;
     private boolean internet;
@@ -44,6 +57,24 @@ public final class SyncService extends Service {
 
     static void start(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
     String status() { return status; }
+    String hostPairingCode() { return host == null || hostIdentity == null ? "" : hostIdentity.code; }
+
+    String hostAddress() {
+        android.net.ConnectivityManager manager = getSystemService(android.net.ConnectivityManager.class);
+        for (android.net.Network network : manager.getAllNetworks()) {
+            android.net.NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+            if (caps == null || !(caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET))) continue;
+            android.net.LinkProperties properties = manager.getLinkProperties(network);
+            if (properties == null) continue;
+            for (android.net.LinkAddress link : properties.getLinkAddresses()) {
+                java.net.InetAddress address = link.getAddress();
+                if (address instanceof java.net.Inet4Address && !address.isLinkLocalAddress() &&
+                        !address.isLoopbackAddress()) return address.getHostAddress() + ":" + Prefs.PORT;
+            }
+        }
+        return "请连接 Wi-Fi 或以太网";
+    }
 
     @Override public void onCreate() {
         super.onCreate();
@@ -62,6 +93,10 @@ public final class SyncService extends Service {
         notifications.createNotificationChannel(new NotificationChannel(CHANNEL, "剪贴板同步",
                 NotificationManager.IMPORTANCE_LOW));
         startForeground(NOTICE, notification());
+        getSystemService(android.net.ConnectivityManager.class).registerNetworkCallback(
+                new android.net.NetworkRequest.Builder()
+                        .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                        .addTransportType(android.net.NetworkCapabilities.TRANSPORT_ETHERNET).build(), networkChanges);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -72,9 +107,12 @@ public final class SyncService extends Service {
     @Override public IBinder onBind(Intent intent) { return null; }
 
     @Override public void onDestroy() {
+        destroyed = true;
+        getSystemService(android.net.ConnectivityManager.class).unregisterNetworkCallback(networkChanges);
         prefs.unregisterOnSharedPreferenceChangeListener(changes);
         main.removeCallbacksAndMessages(null);
         if (client != null) client.close();
+        if (host != null) host.close();
         background.close();
         media.update(false);
         io.quitSafely();
@@ -93,7 +131,7 @@ public final class SyncService extends Service {
     void readFocusedClipboard(boolean focused) {
         if (background.ready()) return;
         Object snapshot = clipboard.snapshot(focused, true);
-        boolean transmit = client != null && prefs.getBoolean(Prefs.AUTO, false);
+        boolean transmit = (client != null || host != null) && prefs.getBoolean(Prefs.AUTO, false);
         if (snapshot != null) worker.post(() -> process(snapshot, transmit));
     }
 
@@ -169,6 +207,13 @@ public final class SyncService extends Service {
         if (target != null)
             for (Wire.Frame change : changes)
                 if (local || change.kind == Wire.DELETE) target.publish(change);
+        SyncHost listening = host;
+        if (local && listening != null)
+            for (Wire.Frame change : changes) listening.publish(change);
+        historyChanged(changes);
+    }
+
+    private void historyChanged(java.util.List<Wire.Frame> changes) {
         if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
     }
 
@@ -198,9 +243,10 @@ public final class SyncService extends Service {
             record(frame, true);
             if (!transmit) return;
             main.post(() -> {
-                if (client == null) {
-                    android.widget.Toast.makeText(this, "请先填写电脑地址和配对码", android.widget.Toast.LENGTH_SHORT).show();
-                } else client.submit(frame);
+                if (host != null) host.submit(frame);
+                else if (client != null) client.submit(frame);
+                else android.widget.Toast.makeText(this, hosting ? "Android 主机尚未启动" : "请先填写主机地址和配对码",
+                        android.widget.Toast.LENGTH_SHORT).show();
             });
         } catch (IOException error) {
             main.post(() -> android.widget.Toast.makeText(this, "无法发送此内容", android.widget.Toast.LENGTH_SHORT).show());
@@ -208,6 +254,81 @@ public final class SyncService extends Service {
     }
 
     private void applySettings() {
+        boolean hostMode = prefs.getBoolean(Prefs.HOST, false);
+        if (hostMode != hosting) {
+            hosting = hostMode;
+            if (client != null) client.close();
+            client = null;
+            currentConnection = null;
+            if (host != null) host.close();
+            host = null;
+            endpoint = null;
+        }
+        if (hosting) {
+            if (host == null && !startingHost) startHost();
+        } else applyClientSettings();
+        media.update(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
+        updateClipboardWatcher();
+    }
+
+    private void updateClipboardWatcher() {
+        background.enable((client != null || host != null) && prefs.getBoolean(Prefs.AUTO, false));
+    }
+
+    private void startHost() {
+        startingHost = true;
+        setStatus("正在启动 Android 主机…");
+        worker.post(() -> {
+            HostIdentity identity = null;
+            try { identity = HostIdentity.open(prefs); }
+            catch (java.security.GeneralSecurityException | IOException | RuntimeException failure) {
+                android.util.Log.w("ClipHost", "Could not load host identity", failure);
+            }
+            final HostIdentity result = identity;
+            main.post(() -> {
+                startingHost = false;
+                if (destroyed || !hosting) return;
+                if (result == null) { setStatus("无法生成主机配对码"); return; }
+                try {
+                    Object connection = new Object();
+                    SyncHost next = new SyncHost(result.tls, result.key, Prefs.PORT, (frame, relay) ->
+                            receive(frame, relay), connected -> main.post(() -> {
+                            if (currentConnection == connection && host != null)
+                                setStatus(connected ? "主机已连接" : "主机已启动，等待连接");
+                            }), history::replay);
+                    hostIdentity = result;
+                    currentConnection = connection;
+                    host = next;
+                    next.start();
+                    setStatus("主机已启动，等待连接");
+                    updateClipboardWatcher();
+                } catch (IOException | RuntimeException failure) {
+                    setStatus("无法监听同步端口");
+                    android.util.Log.w("ClipHost", "Could not start host", failure);
+                }
+            });
+        });
+    }
+
+    private void receive(Wire.Frame frame, java.util.function.Consumer<Wire.Frame> relay) throws IOException {
+        Wire.Frame entry = frame;
+        if (frame.kind < Wire.HISTORY_TEXT) {
+            clipboard.apply(frame);
+            if (frame.kind != Wire.TEXT) return;
+        } else if (frame.kind != Wire.DELETE) {
+            entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data);
+        }
+        try {
+            java.util.List<Wire.Frame> changes = history.apply(entry, false);
+            for (Wire.Frame change : changes)
+                if (relay != null) relay.accept(change);
+            historyChanged(changes);
+        } catch (IOException error) {
+            android.util.Log.w("ClipHistory", "History write failed", error);
+        }
+    }
+
+    private void applyClientSettings() {
         boolean publicMode = prefs.getBoolean(Prefs.INTERNET, false);
         String address = prefs.getString(publicMode ? Prefs.WAN : Prefs.LAN, "").trim();
         String code = prefs.getString(Prefs.PAIR, "").trim();
@@ -219,7 +340,7 @@ public final class SyncService extends Service {
             internet = publicMode;
             byte[] pairing = parsePairing(code);
             Endpoint target = Endpoint.parse(address, Prefs.PORT);
-            if (address.isEmpty()) setStatus("请填写电脑地址");
+            if (address.isEmpty()) setStatus("请填写主机地址");
             else if (target == null) setStatus("地址格式有误，请填写 IP 或域名，可加端口");
             else if (pairing == null) setStatus("请填写有效的配对码");
             else {
@@ -227,17 +348,12 @@ public final class SyncService extends Service {
                 byte[] key = Arrays.copyOfRange(pairing, 32, 64);
                 final Object connection = new Object();
                 currentConnection = connection;
-                client = new SyncClient(target.host, target.port, pin, key, frame -> {
-                    if (frame.kind >= Wire.HISTORY_TEXT) {
-                        Wire.Frame entry = frame;
-                        if (frame.kind != Wire.DELETE)
-                            entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data);
-                        record(entry, false);
-                    } else {
-                        clipboard.apply(frame);
-                        if (frame.kind == Wire.TEXT) record(frame, false);
-                    }
-                }, connected ->
+                client = new SyncClient(target.host, target.port, pin, key,
+                        frame -> receive(frame, change -> {
+                            SyncClient active = client;
+                            if (active != null && currentConnection == connection && change.kind == Wire.DELETE)
+                                active.publish(change);
+                        }), connected ->
                         main.post(() -> {
                             if (currentConnection == connection && client != null)
                                 setStatus(connected ? "已连接" : "正在重连…");
@@ -247,11 +363,10 @@ public final class SyncService extends Service {
                 client.start();
             }
         }
-        media.update(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
-        background.enable(client != null && prefs.getBoolean(Prefs.AUTO, false));
+
     }
 
-    private Object currentConnection;
+    private volatile Object currentConnection;
 
     private static byte[] parsePairing(String value) {
         try {

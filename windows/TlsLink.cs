@@ -1,8 +1,10 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
 internal sealed class TlsLink : IDisposable
@@ -45,6 +47,44 @@ internal sealed class TlsLink : IDisposable
         catch
         {
             socket.Close();
+            throw;
+        }
+    }
+
+    internal static TlsLink Connect(TcpClient socket, string host, int port, byte[] pin, byte[] key)
+    {
+        var connected = socket.BeginConnect(host, port, null, null);
+        using (var wait = connected.AsyncWaitHandle)
+        {
+            if (!wait.WaitOne(6000)) throw new IOException("Connection timed out");
+            socket.EndConnect(connected);
+        }
+        socket.NoDelay = true;
+        socket.ReceiveTimeout = 6000;
+        socket.SendTimeout = 6000;
+        var stream = new SslStream(socket.GetStream(), false, (sender, certificate, chain, errors) =>
+        {
+            if (certificate == null) return false;
+            using (var leaf = new X509Certificate2(certificate))
+            using (var sha = SHA256.Create())
+                return DateTime.Now >= leaf.NotBefore && DateTime.Now <= leaf.NotAfter &&
+                    EqualKey(pin, sha.ComputeHash(leaf.RawData));
+        });
+        var link = new TlsLink(socket, stream);
+        try
+        {
+            stream.AuthenticateAsClient(host, new X509CertificateCollection(), SslProtocols.Tls12, false);
+            byte[] id = Guid.NewGuid().ToByteArray();
+            link.Send(new Frame(Wire.Auth, id, key));
+            Frame ack = link.Read();
+            if (ack == null || ack.Kind != Wire.Ack || !ack.Id.SequenceEqual(id))
+                throw new AuthenticationException("Pairing rejected");
+            socket.ReceiveTimeout = 0;
+            return link;
+        }
+        catch
+        {
+            link.Dispose();
             throw;
         }
     }

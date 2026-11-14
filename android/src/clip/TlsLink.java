@@ -3,6 +3,7 @@ package clip;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import javax.net.ssl.SSLServerSocket;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -49,6 +50,32 @@ final class TlsLink implements Closeable {
             catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
             throw failure;
         }
+    }
+
+    static SSLServerSocket listen(SSLContext context, int port) throws IOException {
+        SSLServerSocket server = (SSLServerSocket) context.getServerSocketFactory().createServerSocket();
+        try {
+            server.setEnabledProtocols(new String[] {"TLSv1.2"});
+            server.setReuseAddress(true);
+            server.bind(new InetSocketAddress(port), 8);
+            return server;
+        } catch (IOException | RuntimeException failure) {
+            try { server.close(); } catch (IOException ignored) { }
+            throw failure;
+        }
+    }
+
+    static TlsLink accept(SSLSocket socket, byte[] key) throws IOException {
+        socket.setTcpNoDelay(true);
+        socket.setSoTimeout(6000);
+        socket.startHandshake();
+        TlsLink link = new TlsLink(socket);
+        Wire.Frame hello = link.read();
+        if (hello == null || hello.kind != Wire.AUTH || !MessageDigest.isEqual(key, hello.data))
+            throw new IOException("Pairing rejected");
+        link.send(new Wire.Frame(Wire.ACK, hello.id, new byte[0]));
+        socket.setSoTimeout(0);
+        return link;
     }
 
     Wire.Frame read() throws IOException {

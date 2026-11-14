@@ -36,20 +36,41 @@ internal static class WindowsAppCheck
             window.UpdateLayout();
             var list = Find<ListBox>(window);
             var scroll = Find<ScrollViewer>(list);
+            var viewport = Find<ScrollContentPresenter>(scroll);
             if (scroll.ScrollableWidth > 0.1) throw new Exception("History overflows horizontally");
             foreach (ListBoxItem item in list.Items)
             {
                 var row = (Panel)item.Content;
                 foreach (var button in row.Children.OfType<Button>())
                 {
-                    var rect = button.TransformToAncestor(scroll).TransformBounds(
+                    var rect = button.TransformToAncestor(viewport).TransformBounds(
                         new Rect(new Point(), button.RenderSize));
-                    if (rect.Width < 61 || rect.Left < 0 || rect.Right > scroll.ViewportWidth + 0.1)
-                        throw new Exception("History action outside the viewport");
+                    if (rect.Width < 61 || rect.Left < 0 || rect.Right > viewport.ActualWidth + 0.1)
+                        throw new Exception("History action outside the viewport: " + rect + " / " + viewport.ActualWidth);
                 }
             }
             Console.WriteLine("PASS: both history actions fit on short and long rows at minimum window size");
+            var type = Descendants<Button>(window).Single(button => Equals(button.Content, "全部"));
+            type.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (!Equals(type.Content, "文字") || list.Items.OfType<ListBoxItem>().Count() != 2)
+                throw new Exception("First click did not filter to text");
+            type.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (!Equals(type.Content, "图片") || list.Items.OfType<ListBoxItem>().Count() != 1)
+                throw new Exception("Second click did not filter to images");
+            type.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (!Equals(type.Content, "全部") || list.Items.OfType<ListBoxItem>().Count() != 3)
+                throw new Exception("Third click did not restore all entries");
             var dates = Descendants<DatePicker>(window).ToArray();
+            foreach (var picker in dates)
+            {
+                picker.ApplyTemplate();
+                var calendarButton = picker.Template.FindName("PART_Button", picker) as Button;
+                if (calendarButton == null) throw new Exception("Missing date field calendar button");
+                calendarButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                if (!picker.IsDropDownOpen) throw new Exception("Calendar button did not open date picker");
+                picker.IsDropDownOpen = false;
+            }
+            Console.WriteLine("PASS: click-to-cycle history types and custom calendar buttons");
             var today = DateTime.Now.Date;
             dates[0].SelectedDate = today;
             dates[1].SelectedDate = today;

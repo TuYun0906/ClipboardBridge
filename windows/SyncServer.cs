@@ -8,7 +8,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Threading;
 
-internal sealed class SyncServer : IDisposable
+internal sealed class SyncServer : ISyncConnection
 {
     private const int MaxPairingAttempts = 16;
     private readonly TcpListener listener;
@@ -69,7 +69,7 @@ internal sealed class SyncServer : IDisposable
         new Thread(() => AcceptLoop(source)) { IsBackground = true, Name = "Clipboard listener" }.Start();
     }
 
-    internal void Publish(Frame frame) { Publish(frame, null); }
+    public void Publish(Frame frame) { Publish(frame, null); }
 
     private void Publish(Frame frame, Peer origin)
     {
@@ -85,7 +85,7 @@ internal sealed class SyncServer : IDisposable
         }
     }
 
-    internal void Submit(Frame frame) { Submit(frame, null); }
+    public void Submit(Frame frame) { Submit(frame, null); }
 
     private void Submit(Frame frame, Peer origin)
     {

@@ -26,9 +26,21 @@ final class SyncHost implements Closeable {
     private boolean closed;
     private int connected;
     private Wire.Frame pending;
+    private final ArrayDeque<ImageDelivery> waitingImages = new ArrayDeque<>();
+
+    private static final class ImageDelivery {
+        final Wire.Frame frame;
+        Runnable confirmation;
+        ImageDelivery(Wire.Frame frame, Runnable confirmation) {
+            this.frame = frame;
+            this.confirmation = confirmation;
+        }
+    }
 
     private static final class Peer {
         final SSLSocket socket;
+        final ArrayDeque<ImageDelivery> images = new ArrayDeque<>();
+        ImageDelivery sentImage;
         final ArrayDeque<Wire.Frame> history = new ArrayDeque<>();
         TlsLink link;
         Wire.Frame pending, sent;
@@ -47,15 +59,19 @@ final class SyncHost implements Closeable {
 
     void start() { startThread(this::accept, "clip-listen"); }
     int port() { return listener.getLocalPort(); }
-    synchronized void submit(Wire.Frame frame) { submit(frame, null); }
+    void submit(Wire.Frame frame) { submit(frame, null, null); }
+    void submit(Wire.Frame frame, Runnable delivered) { submit(frame, null, delivered); }
     synchronized void publish(Wire.Frame frame) { publish(frame, null); }
 
-    private synchronized void submit(Wire.Frame frame, Peer origin) {
+    private synchronized void submit(Wire.Frame frame, Peer origin, Runnable delivered) {
         if (closed) return;
-        pending = origin == null ? frame : null;
+        ImageDelivery image = frame.kind == Wire.IMAGE ? new ImageDelivery(frame, delivered) : null;
+        if (image == null) pending = origin == null ? frame : null;
+        else if (origin == null && connected == 0) waitingImages.add(image);
         for (Peer peer : peers) {
             if (peer == origin || peer.link == null) continue;
-            peer.pending = frame;
+            if (image != null) peer.images.add(image);
+            else peer.pending = frame;
             schedule(peer);
         }
     }
@@ -90,18 +106,29 @@ final class SyncHost implements Closeable {
                 peer.link = link;
                 peer.restore = true;
                 peer.pending = pending;
+                peer.images.addAll(waitingImages);
+                waitingImages.clear();
                 schedule(peer);
                 if (++connected == 1) status.accept(true);
             }
 
             for (Wire.Frame frame; (frame = link.read()) != null;) {
                 if (frame.kind == Wire.ACK) {
+                    Runnable delivered = null;
                     synchronized (this) {
+                        if (peer.sentImage != null && Arrays.equals(peer.sentImage.frame.id, frame.id)) {
+                            delivered = peer.sentImage.confirmation;
+                            peer.sentImage.confirmation = null;
+                            peer.images.remove();
+                            peer.sentImage = null;
+                            schedule(peer);
+                        }
                         if (peer.sent != null && Arrays.equals(peer.sent.id, frame.id)) {
                             if (peer.pending == peer.sent) peer.pending = null;
                             if (pending == peer.sent) pending = null;
                         }
                     }
+                    if (delivered != null) delivered.run();
                 } else if (frame.kind >= Wire.HISTORY_TEXT && frame.kind <= Wire.DELETE) {
                     receiver.apply(frame, change -> publish(change, change.kind == Wire.DELETE ? null : peer));
                 } else if (frame.kind == Wire.TEXT || frame.kind == Wire.IMAGE) {
@@ -118,6 +145,7 @@ final class SyncHost implements Closeable {
                 if (peer.link != null && --connected == 0 && !closed) status.accept(false);
                 peer.link = null;
                 peer.history.clear();
+                peer.images.clear();
             }
         }
     }
@@ -133,7 +161,7 @@ final class SyncHost implements Closeable {
                 oldest.next();
                 oldest.remove();
             }
-            submit(frame, peer);
+            submit(frame, peer, null);
         }
     }
 
@@ -151,12 +179,17 @@ final class SyncHost implements Closeable {
                 Wire.Frame frame = null;
                 synchronized (this) {
                     link = peer.link;
-                    if (closed || link == null || (!peer.restore && peer.history.isEmpty() &&
+                    boolean nextImage = !peer.images.isEmpty() && peer.sentImage == null;
+                    if (closed || link == null || (!peer.restore && !nextImage && peer.history.isEmpty() &&
                             (peer.pending == null || peer.pending == peer.sent))) {
                         peer.writing = false;
                         return;
                     }
                     if (peer.pending != null && peer.pending != peer.sent) frame = peer.sent = peer.pending;
+                    else if (nextImage) {
+                        peer.sentImage = peer.images.peek();
+                        frame = peer.sentImage.frame;
+                    }
                     else if (peer.restore) peer.restore = false;
                     else frame = peer.history.remove();
                 }
@@ -171,6 +204,7 @@ final class SyncHost implements Closeable {
         try { listener.close(); } catch (IOException ignored) { }
         for (Peer peer : peers) closeSocket(peer);
         pending = null;
+        waitingImages.clear();
     }
 
     private static void closeSocket(Peer peer) {

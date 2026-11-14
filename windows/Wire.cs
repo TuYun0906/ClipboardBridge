@@ -19,6 +19,15 @@ internal static class Wire
 {
     internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4, HistoryText = 5, HistoryImage = 6, Delete = 7;
     internal const int IdSize = 16, KeySize = 32;
+    // IDs carry image provenance through live sync, history replay, and older peers.
+    private static readonly byte[] CompressedMark = { 0xC1, 0x19, 0x3B, 0xA6, 0x5D };
+    internal static void MarkCompressed(byte[] id) { Array.Copy(CompressedMark, 0, id, 6, CompressedMark.Length); }
+    internal static bool IsCompressed(byte[] id)
+    {
+        for (int i = 0; i < CompressedMark.Length; i++) if (id[6 + i] != CompressedMark[i]) return false;
+        return true;
+    }
+
     internal const int TextLimit = 1024 * 1024, ImageLimit = 24 * 1024 * 1024;
 
     internal static Frame Read(Stream input)

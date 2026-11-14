@@ -185,11 +185,13 @@ final class ClipHistory {
         final String key, text, contentKey;
         final int kind;
         final long copiedAt;
+        final boolean compressed;
         Entry(File file, String key, Wire.Frame frame) {
             this.file = file;
             this.key = key;
             kind = frame.kind;
             copiedAt = copyTime(key);
+            compressed = kind == Wire.IMAGE && Wire.isCompressed(frame.id);
             text = kind == Wire.TEXT ? new String(frame.data, StandardCharsets.UTF_8) : "图片";
             contentKey = kind == Wire.IMAGE ? imageDigest(frame.data) : text;
         }

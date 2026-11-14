@@ -23,7 +23,9 @@ final class SyncClient implements Closeable {
     private final Object lock = new Object();
     private boolean closed, writing;
     private TlsLink link;
-    private Wire.Frame pending, sent;
+    private Wire.Frame pending, sent, sentImage;
+    private final ArrayDeque<Wire.Frame> images = new ArrayDeque<>();
+    private final java.util.IdentityHashMap<Wire.Frame, Runnable> confirmations = new java.util.IdentityHashMap<>();
     private final ArrayDeque<Wire.Frame> history = new ArrayDeque<>();
     private Replay replay;
     private boolean replayNeeded;
@@ -50,10 +52,16 @@ final class SyncClient implements Closeable {
 
     void start() { reader.start(); }
 
-    void submit(Wire.Frame frame) {
+    void submit(Wire.Frame frame) { submit(frame, null); }
+
+    void submit(Wire.Frame frame, Runnable onDelivered) {
         synchronized (lock) {
             if (closed) return;
-            pending = frame;
+            if (frame.kind == Wire.IMAGE) {
+                images.add(frame);
+                if (onDelivered != null) confirmations.put(frame, onDelivered);
+            }
+            else pending = frame;
             scheduleWrite();
         }
     }
@@ -65,7 +73,7 @@ final class SyncClient implements Closeable {
                 synchronized (lock) {
                     if (closed) return;
                     link = current;
-                    sent = null;
+                    sent = sentImage = null;
                     replayNeeded = replay != null;
                     scheduleWrite();
                 }
@@ -74,9 +82,16 @@ final class SyncClient implements Closeable {
                 for (Wire.Frame frame; (frame = current.read()) != null;) {
                     if (isClosed()) break;
                     if (frame.kind == Wire.ACK) {
+                        Runnable delivered = null;
                         synchronized (lock) {
+                            if (sentImage != null && Arrays.equals(sentImage.id, frame.id) && !images.isEmpty()) {
+                                delivered = confirmations.remove(images.remove());
+                                sentImage = null;
+                                scheduleWrite();
+                            }
                             if (pending != null && Arrays.equals(pending.id, frame.id)) pending = null;
                         }
+                        if (delivered != null) delivered.run();
                     } else {
                         if (frame.kind < Wire.TEXT || frame.kind > Wire.DELETE)
                             throw new IOException("Unexpected message");
@@ -104,7 +119,8 @@ final class SyncClient implements Closeable {
 
     // Must be called while holding lock.
     private void scheduleWrite() {
-        if (closed || writing || link == null || (history.isEmpty() && !replayNeeded && (pending == null || pending == sent))) return;
+        if (closed || writing || link == null || (history.isEmpty() && !replayNeeded &&
+                (images.isEmpty() || sentImage != null) && (pending == null || pending == sent))) return;
         writing = true;
         writer.execute(this::writeLatest);
     }
@@ -116,11 +132,13 @@ final class SyncClient implements Closeable {
             boolean restore = false;
             synchronized (lock) {
                 current = link;
-                if (closed || current == null || (history.isEmpty() && !replayNeeded && (pending == null || pending == sent))) {
+                if (closed || current == null || (history.isEmpty() && !replayNeeded &&
+                (images.isEmpty() || sentImage != null) && (pending == null || pending == sent))) {
                     writing = false;
                     return;
                 }
                 if (pending != null && pending != sent) { frame = pending; sent = frame; }
+                else if (!images.isEmpty() && sentImage == null) frame = sentImage = images.peek();
                 else if (replayNeeded) { restore = true; replayNeeded = false; }
                 else frame = history.remove();
             }
@@ -145,6 +163,8 @@ final class SyncClient implements Closeable {
             current = link;
             link = null;
             pending = null;
+            images.clear();
+            confirmations.clear();
         }
         closeLink(current);
         reader.interrupt();

@@ -59,13 +59,17 @@ final class AndroidClipboard {
         return value;
     }
 
-    Wire.Frame makeFrame(Object snapshot) throws IOException {
+    Wire.Frame makeFrame(Object snapshot) throws IOException { return makeFrame(snapshot, false); }
+
+    Wire.Frame makeFrame(Object snapshot, boolean compress) throws IOException {
         if (snapshot instanceof Uri) {
-            return new Wire.Frame(Wire.IMAGE, id(), imageBytes((Uri) snapshot));
+            byte[] imageId = id();
+            return new Wire.Frame(Wire.IMAGE, imageId, imageBytes((Uri) snapshot, compress, imageId));
         }
         if (snapshot instanceof ParcelFileDescriptor) {
             try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream((ParcelFileDescriptor)snapshot)) {
-                return new Wire.Frame(Wire.IMAGE, id(), imageBytes(in));
+                byte[] imageId = id();
+                return new Wire.Frame(Wire.IMAGE, imageId, imageBytes(in, compress, imageId));
             }
         }
         if (!(snapshot instanceof String)) throw new IOException("No clipboard content");
@@ -92,14 +96,14 @@ final class AndroidClipboard {
         manager.setPrimaryClip(clip);
     }
 
-    private byte[] imageBytes(Uri uri) throws IOException {
+    private byte[] imageBytes(Uri uri, boolean compress, byte[] imageId) throws IOException {
         try (InputStream in = context.getContentResolver().openInputStream(uri)) {
             if (in == null) throw new IOException("Image unavailable");
-            return imageBytes(in);
+            return imageBytes(in, compress, imageId);
         } catch (SecurityException error) { throw new IOException("Image cannot be read", error); }
     }
 
-    private byte[] imageBytes(InputStream in) throws IOException {
+    private byte[] imageBytes(InputStream in, boolean compress, byte[] imageId) throws IOException {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             byte[] buffer = new byte[16384];
             for (int n; (n = in.read(buffer)) != -1;) {
@@ -107,8 +111,16 @@ final class AndroidClipboard {
                 out.write(buffer, 0, n);
             }
             byte[] data = out.toByteArray();
-            validateImage(data);
-            if (ImageFormat.extension(data) != null) return data;
+            BitmapFactory.Options bounds = validateImage(data);
+            String format = ImageFormat.extension(data);
+            if (compress && !"gif".equals(format)) {
+                byte[] candidate = compress(data, bounds);
+                if (candidate != null && candidate.length < data.length) {
+                    Wire.markCompressed(imageId);
+                    return candidate;
+                }
+            }
+            if (format != null) return data;
 
             Bitmap decoded = BitmapFactory.decodeByteArray(data, 0, data.length);
             if (decoded == null) throw new IOException("Invalid image");
@@ -120,12 +132,66 @@ final class AndroidClipboard {
             } finally { decoded.recycle(); }
     }
 
-    private static void validateImage(byte[] data) throws IOException {
+    private static byte[] compress(byte[] bytes, BitmapFactory.Options bounds) throws IOException {
+        final int limit = 1920;
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        opts.inSampleSize = 1;
+        int longest = Math.max(bounds.outWidth, bounds.outHeight);
+        while (longest / (opts.inSampleSize * 2) >= limit) opts.inSampleSize *= 2;
+        Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+        if (decoded == null) throw new IOException("Invalid image");
+        Bitmap scaled = decoded, oriented = decoded;
+        try {
+            int side = Math.max(decoded.getWidth(), decoded.getHeight());
+            if (side > limit) {
+                float ratio = (float)limit / side;
+                scaled = Bitmap.createScaledBitmap(decoded, Math.max(1, Math.round(decoded.getWidth() * ratio)),
+                        Math.max(1, Math.round(decoded.getHeight() * ratio)), true);
+            }
+
+            oriented = scaled;
+            try {
+                android.media.ExifInterface exif = new android.media.ExifInterface(new java.io.ByteArrayInputStream(bytes));
+                int orientation = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+                if (orientation >= 2 && orientation <= 8) {
+                    android.graphics.Matrix transform = new android.graphics.Matrix();
+                    if (orientation == 2 || orientation == 4 || orientation == 5 || orientation == 7)
+                        transform.setScale(-1f, 1f);
+                    if (orientation == 3 || orientation == 4) transform.postRotate(180);
+                    if (orientation == 6 || orientation == 7) transform.postRotate(90);
+                    if (orientation == 5 || orientation == 8) transform.postRotate(270);
+                    oriented = Bitmap.createBitmap(scaled, 0, 0, scaled.getWidth(), scaled.getHeight(), transform, true);
+                }
+            } catch (IOException ignored) { }
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            Bitmap.CompressFormat target = hasTransparency(oriented) ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG;
+            return oriented.compress(target, 82, output) && output.size() <= Wire.IMAGE_LIMIT ? output.toByteArray() : null;
+        } finally {
+            if (oriented != scaled && oriented != decoded) oriented.recycle();
+            if (scaled != decoded) scaled.recycle();
+            decoded.recycle();
+        }
+    }
+
+    private static boolean hasTransparency(Bitmap bitmap) {
+        if (!bitmap.hasAlpha()) return false;
+        int[] row = new int[bitmap.getWidth()];
+        for (int y = 0; y < bitmap.getHeight(); y++) {
+            bitmap.getPixels(row, 0, row.length, 0, y, row.length, 1);
+            for (int pixel : row) if ((pixel >>> 24) != 255) return true;
+        }
+        return false;
+    }
+
+    private static BitmapFactory.Options validateImage(byte[] data) throws IOException {
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0 ||
                 (long) bounds.outWidth * bounds.outHeight > PIXEL_LIMIT) throw new IOException("Invalid image dimensions");
+        return bounds;
     }
 
     private static byte[] id() {

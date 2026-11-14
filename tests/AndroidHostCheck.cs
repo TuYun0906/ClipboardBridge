@@ -9,6 +9,12 @@ internal static class AndroidHostCheck
 {
     private static void Main(string[] args)
     {
+        try { Run(args); }
+        catch (Exception error) { Console.Error.WriteLine(error.GetType().Name + ": " + error.Message); Environment.ExitCode = 1; }
+    }
+
+    private static void Run(string[] args)
+    {
         int port = int.Parse(args[0]);
         byte[] pin;
         using (var sha = SHA256.Create()) pin = sha.ComputeHash(System.IO.File.ReadAllBytes(args[1]));
@@ -32,6 +38,13 @@ internal static class AndroidHostCheck
             client.Start();
             Check(received, Wire.HistoryText, "host history");
             client.Submit(Make(Wire.Text, 1, "Windows copy"));
+            for (byte i = 11; i <= 13; i++)
+            {
+                Frame image = Make(Wire.Image, i, "image " + i);
+                if (i == 12) Wire.MarkCompressed(image.Id);
+                client.Submit(image);
+            }
+            for (int i = 21; i <= 23; i++) Check(received, Wire.Image, "host image " + i);
             client.Publish(Make(Wire.Delete, 8, ""));
             Check(received, Wire.Text, "Android copy");
             client.Publish(Make(Wire.HistoryText, 2, "edited history"));
@@ -53,7 +66,8 @@ internal static class AndroidHostCheck
         {
             if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind);
         } while (frame.Kind == Wire.Delete);
-        if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text)
-            throw new Exception("Unexpected frame " + frame.Kind);
+        if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text ||
+            (kind == Wire.Image && Wire.IsCompressed(frame.Id) != (text == "host image 22")))
+            throw new Exception("Expected " + text + "; got " + frame.Kind + ": " + Encoding.UTF8.GetString(frame.Data));
     }
 }

@@ -9,6 +9,14 @@ import java.io.OutputStream;
 final class Wire {
     static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4, HISTORY_TEXT = 5, HISTORY_IMAGE = 6, DELETE = 7;
     static final int ID_SIZE = 16, KEY_SIZE = 32;
+    // Preserve provenance without changing the frame layout understood by older peers.
+    private static final byte[] COMPRESSED_MARK = {(byte)0xC1, 0x19, 0x3B, (byte)0xA6, 0x5D};
+    static void markCompressed(byte[] id) { System.arraycopy(COMPRESSED_MARK, 0, id, 6, COMPRESSED_MARK.length); }
+    static boolean isCompressed(byte[] id) {
+        for (int i = 0; i < COMPRESSED_MARK.length; i++) if (id[6 + i] != COMPRESSED_MARK[i]) return false;
+        return true;
+    }
+
     static final int TEXT_LIMIT = 1024 * 1024, IMAGE_LIMIT = 24 * 1024 * 1024;
 
     static final class Frame {

@@ -85,7 +85,7 @@ public final class SyncService extends Service {
         io = new HandlerThread("clipboard-media");
         io.start();
         worker = new Handler(io.getLooper());
-        media = new MediaWatcher(this, worker, this::sendOnWorker);
+        media = new MediaWatcher(this, worker, image -> process(image, true, true));
         background = new BackgroundClipboard(this, this::send,
                 () -> sendBroadcast(new Intent(STATUS).setPackage(getPackageName())));
         prefs.registerOnSharedPreferenceChangeListener(changes);
@@ -237,14 +237,20 @@ public final class SyncService extends Service {
         process(snapshot, true);
     }
 
-    private void process(Object snapshot, boolean transmit) {
+    private void process(Object snapshot, boolean transmit) { process(snapshot, transmit, false); }
+
+    private void process(Object snapshot, boolean transmit, boolean confirmCapture) {
         try {
-            Wire.Frame frame = clipboard.makeFrame(snapshot);
+            Wire.Frame frame = clipboard.makeFrame(snapshot, transmit && prefs.getBoolean(Prefs.COMPRESS, false));
             record(frame, true);
             if (!transmit) return;
             main.post(() -> {
-                if (host != null) host.submit(frame);
-                else if (client != null) client.submit(frame);
+                Runnable delivered = confirmCapture ? () -> main.post(() -> {
+                    if (!destroyed) android.widget.Toast.makeText(this, "发送图片成功",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                }) : null;
+                if (host != null) host.submit(frame, delivered);
+                else if (client != null) client.submit(frame, delivered);
                 else android.widget.Toast.makeText(this, hosting ? "Android 主机尚未启动" : "请先填写主机地址和配对码",
                         android.widget.Toast.LENGTH_SHORT).show();
             });

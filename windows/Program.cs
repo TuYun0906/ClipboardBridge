@@ -40,6 +40,7 @@ internal sealed class Program : IDisposable
     }
 
     internal bool Automatic { get; private set; }
+    internal bool CompressImages { get; private set; }
     internal bool PublicMode { get; private set; }
     internal string RemoteAddress { get; private set; }
     internal string RemoteCode { get; private set; }
@@ -93,7 +94,8 @@ internal sealed class Program : IDisposable
         PublicMode = options.Length > 1 && options[1] == '1';
         ShowWindow = !startHidden;
         History = new ClipHistory(Path.Combine(directory, "history"));
-        History.SaveImages = options.Length > 3 && options[3] == '1';
+        History.SaveImages = lines[0].Length > 3 && lines[0][3] == '1';
+        CompressImages = lines[0].Length > 4 && lines[0][4] == '1';
         using (var stream = typeof(Program).Assembly.GetManifestResourceStream("Clipboard.ico"))
         using (var icon = new Icon(stream, 32, 32)) trayIcon = (Icon)icon.Clone();
 
@@ -125,7 +127,7 @@ internal sealed class Program : IDisposable
     }
 
     internal void SaveSettings(bool automatic, bool publicMode, bool visible, bool saveImages = false,
-        bool clientMode = false, string remoteAddress = "", string remoteCode = "")
+        bool clientMode = false, string remoteAddress = "", string remoteCode = "", bool compressImages = false)
     {
         bool changed = PublicMode != publicMode || ClientMode != clientMode ||
             RemoteAddress != remoteAddress || RemoteCode != remoteCode;
@@ -133,6 +135,7 @@ internal sealed class Program : IDisposable
         RemoteAddress = remoteAddress;
         RemoteCode = remoteCode;
         Automatic = automatic;
+        CompressImages = compressImages;
         PublicMode = publicMode;
         History.SaveImages = saveImages;
         SetVisible(visible);
@@ -143,7 +146,7 @@ internal sealed class Program : IDisposable
                 System.Security.Cryptography.ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(RemoteCode),
                     null, System.Security.Cryptography.DataProtectionScope.CurrentUser));
             File.WriteAllText(settingsPath, (Automatic ? "1" : "0") + (PublicMode ? "1" : "0") +
-                "1" + (History.SaveImages ? "1" : "0") + "\n" + (ClientMode ? "client" : "host") +
+                "1" + (History.SaveImages ? "1" : "0") + (CompressImages ? "1" : "0") + "\n" + (ClientMode ? "client" : "host") +
                 "\n" + RemoteAddress + "\n" + encoded);
         }
         catch (IOException) { SetStatus("无法保存设置"); }
@@ -265,11 +268,12 @@ internal sealed class Program : IDisposable
     private void QueueContent(object content, bool send)
     {
         ISyncConnection target = send ? connection : null;
+        bool compress = send && CompressImages;
         Task.Factory.StartNew(delegate
         {
             try
             {
-                Frame frame = WindowsClipboard.ToFrame(content);
+                Frame frame = WindowsClipboard.ToFrame(content, compress);
                 if (target != null) target.Submit(frame);
                 Record(frame, true);
             }

@@ -163,7 +163,9 @@ internal sealed class MainWindow : Window
                 string timestamp = entry.CopyTime.HasValue
                     ? entry.CopyTime.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
                     : "复制时间未知";
-                var time = Label(timestamp, 12, Muted, false);
+                var time = Label(entry.Compressed ? "已压缩 · " + timestamp : timestamp, 12,
+                    entry.Compressed ? Blue : Muted, false);
+                if (entry.Compressed) time.ToolTip = "已压缩 · " + timestamp;
                 time.Margin = new Thickness(0, 3, 0, 0);
                 details.Children.Add(time);
                 row.Children.Add(details);
@@ -508,9 +510,12 @@ internal sealed class MainWindow : Window
         updateMode();
         var automatic = Check("自动发送刚复制的内容", program.Automatic);
         var images = Check("历史记录保存图片", program.History.SaveImages);
+        var compress = Check("发送前压缩图片", program.CompressImages);
+        compress.ToolTip = "减少发送的数据量，可能降低图片分辨率";
         var startup = Check("开机自启", Program.StartWithWindows);
         body.Children.Add(automatic);
         body.Children.Add(images);
+        body.Children.Add(compress);
         body.Children.Add(startup);
         var save = Action("保存设置", true, () =>
         {
@@ -543,7 +548,7 @@ internal sealed class MainWindow : Window
                 return;
             }
             dialog.Close();
-            program.SaveSettings(auto, online, program.ShowWindow, saveImages, connecting, remoteAddress, remoteCode);
+            program.SaveSettings(auto, online, program.ShowWindow, saveImages, connecting, remoteAddress, remoteCode, compress.IsChecked == true);
         });
         save.Height = 43;
         save.Margin = new Thickness(0, 11, 0, 0);
@@ -581,9 +586,10 @@ internal sealed class MainWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = "选择要发送的图片", Filter = "图片|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff",
-            Multiselect = false
+            Multiselect = true
         };
-        if (dialog.ShowDialog(this) == true) program.Send(new FileInfo(dialog.FileName));
+        if (dialog.ShowDialog(this) == true)
+            foreach (string path in dialog.FileNames) program.Send(new FileInfo(path));
     }
 
     private Window Dialog(string title, double width)

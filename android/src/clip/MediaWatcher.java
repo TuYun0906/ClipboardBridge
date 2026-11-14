@@ -72,15 +72,15 @@ final class MediaWatcher extends ContentObserver {
         params.putInt(ContentResolver.QUERY_ARG_LIMIT, 80);
         try (Cursor rows = resolver.query(Media.EXTERNAL_CONTENT_URI, columns, params, null)) {
             if (rows == null) return;
-            Uri newest = null;
+            java.util.ArrayList<Uri> captures = new java.util.ArrayList<>();
             while (rows.moveToNext()) {
                 long id = rows.getLong(0);
                 String path = rows.getString(1);
                 if (!captureFolder(path) || !seen.add(id)) continue;
-                if (!baseline && newest == null) newest = ContentUris.withAppendedId(Media.EXTERNAL_CONTENT_URI, id);
+                if (!baseline) captures.add(ContentUris.withAppendedId(Media.EXTERNAL_CONTENT_URI, id));
             }
             while (seen.size() > 320) seen.remove(seen.iterator().next());
-            if (newest != null) onImage.accept(newest);
+            for (int i = captures.size() - 1; i >= 0; i--) onImage.accept(captures.get(i));
         }
     }
 

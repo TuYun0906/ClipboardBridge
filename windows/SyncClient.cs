@@ -26,6 +26,8 @@ internal sealed class SyncClient : ISyncConnection
     private TcpClient socket;
     private TlsLink link;
     private Frame pending, sent;
+    private readonly Queue<Frame> images = new Queue<Frame>();
+    private Frame sentImage;
     private byte[] lastReceived;
 
     internal SyncClient(Uri endpoint, byte[] pairing, Action<Frame, Action<Frame>> receive,
@@ -69,7 +71,8 @@ internal sealed class SyncClient : ISyncConnection
         lock (gate)
         {
             if (closed) return;
-            pending = frame;
+            if (frame.Kind == Wire.Image) images.Enqueue(frame);
+            else pending = frame;
             ScheduleWrite();
         }
     }
@@ -103,7 +106,7 @@ internal sealed class SyncClient : ISyncConnection
                     {
                         if (closed) return;
                         link = current;
-                        sent = null;
+                        sent = sentImage = null;
                         replayNeeded = true;
                         ScheduleWrite();
                     }
@@ -113,7 +116,15 @@ internal sealed class SyncClient : ISyncConnection
                         if (frame.Kind == Wire.Ack)
                         {
                             lock (gate)
+                            {
+                                if (sentImage != null && sentImage.Id.SequenceEqual(frame.Id) && images.Count > 0)
+                                {
+                                    images.Dequeue();
+                                    sentImage = null;
+                                    ScheduleWrite();
+                                }
                                 if (pending != null && pending.Id.SequenceEqual(frame.Id)) pending = null;
+                            }
                         }
                         else if (frame.Kind >= Wire.HistoryText) receive(frame, Publish);
                         else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
@@ -169,13 +180,15 @@ internal sealed class SyncClient : ISyncConnection
             lock (gate)
             {
                 current = link;
-                if (current == null || (pending == sent && !replayNeeded && history.Count == 0) ||
-                    (pending == null && !replayNeeded && history.Count == 0))
+                bool nextImage = images.Count > 0 && sentImage == null;
+                if (current == null || (!nextImage && !replayNeeded && history.Count == 0 &&
+                    (pending == null || pending == sent)))
                 {
                     writing = false;
                     return;
                 }
                 if (pending != null && pending != sent) frame = sent = pending;
+                else if (nextImage) frame = sentImage = images.Peek();
                 else if (replayNeeded) { replayNeeded = false; frame = null; }
                 else frame = history.Dequeue();
             }
@@ -204,6 +217,7 @@ internal sealed class SyncClient : ISyncConnection
         lock (gate)
         {
             closed = true;
+            images.Clear();
             link = null;
             if (socket != null) socket.Close();
             Monitor.PulseAll(gate);

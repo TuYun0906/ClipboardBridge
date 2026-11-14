@@ -28,6 +28,23 @@ internal static class WindowsAppCheck
         var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(320, 160, 96, 96,
             PixelFormats.Gray8, null, new byte[320 * 160], 320);
         history.Apply(WindowsClipboard.ToFrame(bitmap), false);
+        var pixels = new byte[2400 * 1200 * 3];
+        new Random(43).NextBytes(pixels);
+        var noise = System.Windows.Media.Imaging.BitmapSource.Create(2400, 1200, 96, 96,
+            PixelFormats.Bgr24, null, pixels, 2400 * 3);
+        var original = WindowsClipboard.ToFrame(noise);
+        var compressed = WindowsClipboard.ToFrame(noise, true);
+        var decoded = WindowsClipboard.DecodePreview(compressed.Data, 4096);
+        if (decoded.PixelWidth > 1920 || decoded.PixelWidth <= decoded.PixelHeight ||
+            compressed.Data.Length >= original.Data.Length)
+            throw new Exception("Photo compression did not reduce size");
+        var transparent = System.Windows.Media.Imaging.BitmapSource.Create(1, 1, 96, 96,
+            PixelFormats.Bgra32, null, new byte[] {0, 0, 0, 0}, 4);
+        var alpha = WindowsClipboard.ToFrame(transparent, true);
+        if (!Wire.IsCompressed(compressed.Id) || Wire.IsCompressed(original.Id) || Wire.IsCompressed(alpha.Id))
+            throw new Exception("Compression provenance does not match actual output");
+        if (alpha.Data[0] != 137) throw new Exception("Compression lost transparency");
+        Console.WriteLine("PASS: compression reduces photo bytes and preserves transparency");
         using (var program = new Program(app, path))
         {
             var window = app.Windows.OfType<MainWindow>().Single();

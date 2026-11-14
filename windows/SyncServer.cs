@@ -26,10 +26,12 @@ internal sealed class SyncServer : ISyncConnection
     private bool closed;
     private int connected;
     private Frame pending;
+    private readonly Queue<Frame> waitingImages = new Queue<Frame>();
 
     private sealed class Peer
     {
         internal readonly TcpClient Socket;
+        internal readonly Queue<Frame> Images = new Queue<Frame>();
         internal readonly Queue<Frame> History = new Queue<Frame>();
         internal TlsLink Link;
         internal Frame Pending, Sent;
@@ -92,11 +94,13 @@ internal sealed class SyncServer : ISyncConnection
         lock (gate)
         {
             if (closed) return;
-            pending = origin == null ? frame : null;
+            if (frame.Kind != Wire.Image) pending = origin == null ? frame : null;
+            else if (origin == null && connected == 0) waitingImages.Enqueue(frame);
             foreach (Peer peer in peers)
             {
                 if (peer.Link == null || peer == origin) continue;
-                peer.Pending = frame;
+                if (frame.Kind == Wire.Image) peer.Images.Enqueue(frame);
+                else peer.Pending = frame;
                 ScheduleWrite(peer);
             }
         }
@@ -137,6 +141,7 @@ internal sealed class SyncServer : ISyncConnection
                     if (closed) return;
                     peer.Link = link;
                     peer.Pending = pending;
+                    while (waitingImages.Count > 0) peer.Images.Enqueue(waitingImages.Dequeue());
                     peer.ReplayNeeded = replay != null;
                     ScheduleWrite(peer);
                     if (++connected == 1) status(true);
@@ -177,6 +182,7 @@ internal sealed class SyncServer : ISyncConnection
                 if (peer.Link != null && --connected == 0 && !closed) status(false);
                 peer.Link = null;
                 peer.History.Clear();
+                peer.Images.Clear();
             }
         }
     }
@@ -214,12 +220,13 @@ internal sealed class SyncServer : ISyncConnection
                 {
                     link = peer.Link;
                     if (closed || link == null ||
-                        (!peer.ReplayNeeded && peer.History.Count == 0 && (peer.Pending == null || peer.Pending == peer.Sent)))
+                        (!peer.ReplayNeeded && peer.Images.Count == 0 && peer.History.Count == 0 && (peer.Pending == null || peer.Pending == peer.Sent)))
                     {
                         peer.Writing = false;
                         return;
                     }
                     if (peer.Pending != null && peer.Pending != peer.Sent) frame = peer.Sent = peer.Pending;
+                    else if (peer.Images.Count > 0) frame = peer.Images.Dequeue();
                     else if (peer.ReplayNeeded) peer.ReplayNeeded = false;
                     else frame = peer.History.Dequeue();
                 }
@@ -242,6 +249,7 @@ internal sealed class SyncServer : ISyncConnection
             if (loopback != null) loopback.Stop();
             foreach (Peer peer in peers) peer.Socket.Close();
             pending = null;
+            waitingImages.Clear();
         }
     }
 }

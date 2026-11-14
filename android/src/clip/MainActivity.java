@@ -196,6 +196,9 @@ public final class MainActivity extends Activity {
                 prefs.getBoolean(ClipHistory.SAVE_IMAGES, false));
         saveImages.setOnCheckedChangeListener((button, enabled) ->
                 prefs.edit().putBoolean(ClipHistory.SAVE_IMAGES, enabled).apply());
+        Switch compress = toggle(options, "发送前压缩图片", prefs.getBoolean(Prefs.COMPRESS, false));
+        compress.setOnCheckedChangeListener((button, enabled) ->
+                prefs.edit().putBoolean(Prefs.COMPRESS, enabled).apply());
         auto = toggle(options, "打开软件时自动发送剪贴板", prefs.getBoolean(Prefs.AUTO, false));
         authorize = Style.action(this, "授权 Shizuku 后台同步", false, this::requestBackgroundAccess);
         add(options, authorize, 4, dp(42));
@@ -301,13 +304,23 @@ public final class MainActivity extends Activity {
     }
 
     private void selectImage() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*")
+                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(intent, IMAGE);
     }
 
     @Override protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
-        if (code == IMAGE && result == RESULT_OK && data != null && data.getData() != null) submit(data.getData());
+        if (code != IMAGE || result != RESULT_OK || data == null) return;
+        android.content.ClipData selection = data.getClipData();
+        if (selection == null) {
+            if (data.getData() != null) submit(data.getData());
+        } else {
+            for (int i = 0; i < selection.getItemCount(); i++) {
+                Uri image = selection.getItemAt(i).getUri();
+                if (image != null) submit(image);
+            }
+        }
     }
 
     private void submit(Object content) {
@@ -424,7 +437,7 @@ public final class MainActivity extends Activity {
                         android.content.res.ColorStateList.valueOf(0x283368ea), surface, null));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
                 if (entry.kind == Wire.IMAGE) {
-                    card.setContentDescription("图片记录");
+                    card.setContentDescription(entry.compressed ? "已压缩的图片记录" : "图片记录");
                     previews.put(entry.key, addHistoryImage(card, service, entry));
                 }
                 else {
@@ -434,8 +447,9 @@ public final class MainActivity extends Activity {
                     add(card, label, 0, -2);
                     previews.put(entry.key, () -> previewHistoryText(service, entry));
                 }
-                add(card, Style.label(this, copied == null ? "复制时间未知" : timestamp.format(copied),
-                        12, Style.MUTED, false), 5, -2);
+                String timeLabel = copied == null ? "复制时间未知" : timestamp.format(copied);
+                add(card, Style.label(this, entry.compressed ? "已压缩 · " + timeLabel : timeLabel,
+                        12, entry.compressed ? Style.BLUE : Style.MUTED, false), 5, -2);
                 card.setOnClickListener(view -> {
                     if (!selected.isEmpty()) {
                         if (!selected.remove(entry.key)) selected.add(entry.key);

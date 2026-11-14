@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -90,7 +91,7 @@ internal sealed class WindowsClipboard : IDisposable
         return id;
     }
 
-    internal static Frame ToFrame(object content)
+    internal static Frame ToFrame(object content, bool compress = false)
     {
         string text = content as string;
         if (text != null)
@@ -111,14 +112,103 @@ internal sealed class WindowsClipboard : IDisposable
         if (bitmap == null && image != null) bitmap = Decode(image);
         if (bitmap == null) throw new IOException("无法读取图片");
         ValidateDimensions(bitmap);
-        using (var png = new MemoryStream())
+        byte[] result;
+        bool compressed = false;
+        if (!compress) result = Encode(bitmap, new PngBitmapEncoder());
+        else if (image != null && IsGif(image)) result = image;
+        else
         {
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            encoder.Save(png);
-            if (png.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");
-            return new Frame(Wire.Image, NewId(), png.ToArray());
+            if (image != null) bitmap = OrientForCompression(bitmap, image);
+            bool transparent = HasTransparency(bitmap);
+            int longest = Math.Max(bitmap.PixelWidth, bitmap.PixelHeight);
+            // Never upscale an image.
+            BitmapSource reduced = bitmap;
+            if (longest > 1920)
+            {
+                double scale = 1920.0 / longest;
+                reduced = new TransformedBitmap(bitmap, new ScaleTransform(
+                    Math.Max(1, bitmap.PixelWidth * scale) / bitmap.PixelWidth,
+                    Math.Max(1, bitmap.PixelHeight * scale) / bitmap.PixelHeight));
+            }
+            result = Encode(reduced, transparent ? (BitmapEncoder)new PngBitmapEncoder()
+                : new JpegBitmapEncoder { QualityLevel = 82 });
+            byte[] baseline = image != null && IsStandardImage(image) ? image :
+                Encode(bitmap, new PngBitmapEncoder());
+            compressed = result.Length < baseline.Length;
+            if (!compressed) result = baseline;
         }
+        if (result.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");
+        byte[] id = NewId();
+        if (compressed) Wire.MarkCompressed(id);
+        return new Frame(Wire.Image, id, result);
+    }
+
+    private static BitmapSource OrientForCompression(BitmapSource bitmap, byte[] image)
+    {
+        if (image.Length < 4 || image[0] != 255 || image[1] != 216) return bitmap;
+        try
+        {
+            using (var input = new MemoryStream(image, false))
+            {
+                var jpeg = new JpegBitmapDecoder(input, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
+                var metadata = jpeg.Frames[0].Metadata as BitmapMetadata;
+                object value = metadata == null ? null : metadata.GetQuery("/app1/ifd/{ushort=274}");
+                int orientation = value is ushort ? (ushort)value : 1;
+                if (orientation < 2 || orientation > 8) return bitmap;
+                var transforms = new TransformGroup();
+                if (orientation == 2 || orientation == 4 || orientation == 5 || orientation == 7)
+                    transforms.Children.Add(new ScaleTransform(-1, 1));
+                if (orientation == 3 || orientation == 4) transforms.Children.Add(new RotateTransform(180));
+                if (orientation == 6 || orientation == 7) transforms.Children.Add(new RotateTransform(90));
+                if (orientation == 5 || orientation == 8) transforms.Children.Add(new RotateTransform(270));
+                return new TransformedBitmap(bitmap, transforms);
+            }
+        }
+        catch (NotSupportedException) { return bitmap; }
+        catch (System.Runtime.InteropServices.COMException) { return bitmap; }
+    }
+
+    private static byte[] Encode(BitmapSource image, BitmapEncoder encoder)
+    {
+        using (var output = new MemoryStream())
+        {
+            encoder.Frames.Add(BitmapFrame.Create(image));
+            encoder.Save(output);
+            return output.ToArray();
+        }
+    }
+
+    private static bool IsGif(byte[] data)
+    {
+        return data.Length >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F';
+    }
+
+    private static bool IsStandardImage(byte[] data)
+    {
+        return data.Length >= 8 && ((data[0] == 137 && data[1] == 80 && data[2] == 78 && data[3] == 71) ||
+            (data[0] == 255 && data[1] == 216 && data[2] == 255) ||
+            (data[0] == 'B' && data[1] == 'M') || IsGif(data));
+    }
+
+    private static bool HasTransparency(BitmapSource bitmap)
+    {
+        if (bitmap.Palette != null)
+        {
+            foreach (var color in bitmap.Palette.Colors) if (color.A != 255) return true;
+            return false;
+        }
+        var format = bitmap.Format;
+        if (format != PixelFormats.Bgra32 && format != PixelFormats.Pbgra32 &&
+            format != PixelFormats.Rgba64 && format != PixelFormats.Prgba64 &&
+            format != PixelFormats.Rgba128Float && format != PixelFormats.Prgba128Float) return false;
+        var rgba = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+        var line = new byte[rgba.PixelWidth * 4];
+        for (int y = 0; y < rgba.PixelHeight; y++)
+        {
+            rgba.CopyPixels(new Int32Rect(0, y, rgba.PixelWidth, 1), line, line.Length, 0);
+            for (int x = 3; x < line.Length; x += 4) if (line[x] != 255) return true;
+        }
+        return false;
     }
 
     internal static DataObject ToClipboardData(Frame frame)

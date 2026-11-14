@@ -1,73 +1,41 @@
-# 跨设备剪贴板 · 0.4.15
+# 跨设备剪贴板 · ClipboardBridge
 
-Windows 便携版与 Android 安装包在 [Releases](https://github.com/TuYun0906/ClipboardBridge/releases) 下载。
+在 Windows、Android 手机和平板之间同步剪贴板。复制文字或图片后，可以在另一台设备直接粘贴。也可以手动发送文字、一次选择多张图片，或从历史记录找回复制过的内容。
 
-双端主界面的「如何上手」提供局域网配对、Shizuku 后台同步和 Tailscale 公网连接步骤。
+## 下载
 
-## 发布新版本
+| 平台 | 安装包 | 系统要求 |
+| --- | --- | --- |
+| Windows | [下载便携版 EXE](https://github.com/TuYun0906/ClipboardBridge/releases/latest/download/Clipboard-Windows.exe) | Windows 10 或 11，.NET Framework 4.8 或更新版本 |
+| Android | [下载 APK](https://github.com/TuYun0906/ClipboardBridge/releases/latest/download/Clipboard-Android.apk) | Android 10 或更新版本 |
 
-提交本次改动后，在对应提交上创建并推送 `v主版本.次版本.修订号` 标签。GitHub Actions 会验证传输协议、构建双端程序、签名 APK，并把安装包上传到该标签的 Release。Android 发布签名由仓库的 Actions secrets 提供。
+查看 [所有版本及更新日志](https://github.com/TuYun0906/ClipboardBridge/releases)。
 
-本地构建使用 Windows PowerShell 7、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。先运行 `android/fetch-deps.ps1`，再运行 `windows/build.ps1` 和 `android/build.ps1`。Android 脚本需传入 SDK 的 `android.jar`、Build Tools 目录和 JDK 根目录。
+## 快速上手
 
-## 局域网配对
+1. 让设备连接同一个 Wi-Fi 或局域网。
+2. 选一台设备作为主机。在 Windows 打开「设置」查看地址并复制配对码。使用 Android 当主机时，在「连接」打开「作为主机」，再查看地址并复制配对码。
+3. 在其他设备输入主机地址和配对码，保存连接。在 Windows 连接手机时，先勾选「连接到 Android 主机」。在 Android 作为客户端时，关闭「作为主机」和「公网模式」。若 Windows 防火墙询问，允许应用在当前受信任的专用网络接收入站连接。
+4. 看到「已连接」后，先手动发送一段文字，在另一台设备粘贴验证。开启自动发送后，也可以直接复制。图片粘贴需要目标应用支持。
 
-1. 在 Windows 10 或 11 上运行 `Clipboard-Windows.exe`。程序使用 .NET Framework 4.8 或更新版本。在 Android 10 或以上的手机上安装并打开 `Clipboard-Android.apk`。
-2. 让手机与电脑加入同一个局域网。在 Windows 窗口点「设置」，记下显示的地址，然后点「复制配对码」。
-3. 在手机的「连接」填写电脑地址和配对码，关闭「公网模式」，点「保存连接」。两端显示「已连接」后即可发送。若 Windows 防火墙询问，允许应用在当前受信任的专用网络接收入站连接。
-4. 手机和平板可同时连接同一台 Windows 电脑，各设备使用同一个电脑地址和配对码。
+## 主要功能
 
-## Android 作为主机
+- **复制和发送**：自动同步文字和图片，也可手动发送。选图支持多选，开启「发送前压缩图片」可减少流量。系统剪贴板保留最后收到的一张图。
+- **共享历史**：支持搜索、按日期和类型筛选、预览、编辑文字和删除。历史编辑和删除会在设备之间同步，重复文字或图片保留最新一条。想逐张找回批量发送的图片，请在发送端开启「历史记录保存图片」。实际压缩过的图片会标为「已压缩」。
+- **后台使用**：Windows 关闭窗口后可从系统托盘恢复，也可以设置开机自启。Android 使用前台服务保持连接，保留当前输入法。
+- **截图与拍照**：Android 可自动发送新保存的截图和相机照片。对端确认写入剪贴板后显示「发送图片成功」。华为设备和 Android 10 可在「同步与历史」点「允许显示底部发送提示」，完成系统悬浮窗授权，启用底部圆角提示。
 
-1. 让设备加入同一个局域网。在 Android 主界面的「连接」打开「作为主机」，记下显示的地址，点「复制配对码」。
-2. 在 Windows「设置」勾选「连接到 Android 主机」，填入地址和配对码，再保存。另一台 Android 也可以连接：保持「作为主机」关闭，在「连接」里填入这两项并保存。
-3. 已连接的设备可以互传剪贴板并同步历史。主机在前台服务运行时保持监听；如果主机切换 Wi-Fi 后地址变了，请在客户端更新地址。Shizuku 仅用于 Android 后台自动读取剪贴板，不是担任主机的条件。
+## Android 权限
 
-## Android 后台自动发送
-
-先从官方渠道安装 Shizuku，并按设备系统版本启动。 [Shizuku 下载](https://shizuku.rikka.app/download/)
-
-- **华为 nova 9 SE（Android 10）**：在开发者选项开启 USB 调试，用数据线连接电脑。在 Shizuku 的「通过连接电脑启动」查看启动命令，按官方说明用 Windows 上的 ADB 执行。 [通过电脑启动](https://shizuku.rikka.app/guide/setup/#start-by-connecting-to-a-computer)
-- **小米 Pad 7（Android 15）**：在开发者选项开启无线调试。在 Shizuku 里按「配对」提示输入系统显示的配对码，再返回 Shizuku 点「启动」。 [通过无线调试启动](https://shizuku.rikka.app/guide/setup/#start-via-wireless-debugging)
-
-完成局域网配对后，在剪贴板应用开启自动发送，点「授权 Shizuku 后台同步」，并在授权弹窗允许访问。开关文字变成「自动发送剪贴板」后，即可退出到桌面。手机重启后，先确认 Shizuku 显示正在运行。若服务已停止，按上面对应的方式重新启动。
-
-## 复制、发送和浮窗
-
-- Windows 开启「自动发送刚复制的内容」后，复制文字或图片即可发送。手机收到后，直接使用目标应用的系统粘贴操作。
-- Android 保留现有输入法。后台自动发送生效时，在其他应用复制文字或图片，电脑即可直接粘贴。如果设置显示「打开软件时自动发送剪贴板」，手机复制后需打开本软件触发发送。两端也可以用「发送文字」和「选择图片」手动发送。
-- Android 开启「自动发送截图与拍照」时选择允许访问全部照片。保存到系统截图或相机目录的新图片会发送到其他设备。收到对方写入剪贴板的确认后，Android 会提示「发送图片成功」。华为设备和 Android 10 可点「允许显示底部发送提示」，在系统设置授权显示悬浮窗。收到回执时会在当前屏幕底部短暂显示圆角提示，也可在「剪贴板同步」通知或应用首页查看最近一次发送成功的时间。能否粘贴图片取决于目标应用支持的剪贴板格式。
-- Windows 点窗口右上角的关闭按钮后继续在托盘运行。左键单击蓝色剪贴板图标恢复窗口，右键菜单提供「显示窗口」和「退出」。开启「设置 → 开机自启」后，登录 Windows 时应用直接在托盘启动。更新或移动 EXE 时，先从托盘退出旧进程，再运行新位置的 EXE 一次。已有自启项会自动更新。
-- Android 通过后台服务保持连接，可从常驻通知或应用图标返回设置。
-
-两端「选择图片」都可以一次选多张。选中的图片依次发送，系统剪贴板保留最后收到的一张；要逐张取回，请开启发送端的「历史记录保存图片」。两端可开启「发送前压缩图片」以减少传输量。只有实际变小的图片会在历史中标为「已压缩」，源文件保持原样。
-
-## 剪贴板历史
-
-Windows 在主窗口直接搜索历史，Android 点主页面的「历史记录」。文字按内容匹配，图片可搜「图片」。Windows 历史行提供「复制」和「删除」，双击记录可用滚轮调整字号或缩放图片。Android 点按文字或图片记录即可复制，底部会提示「已复制」。长按进入多选，点按其他记录可增减选中项，底部「删除」可批量删除。
-
-Android 选中一条后，底部「预览」可打开文字编辑或在卡片内展开图片。文字有改动时显示「保存」。直接关闭会询问是否保存。保存后，修改后的文字会替换各设备上的旧记录，离线设备会在重连后更新。
-
-文字和图片记录按设备本地时区显示原始复制或发送时间，精确到秒。点击类型按钮可按「全部 → 文字 → 图片 → 全部」循环，并与关键词、开始和结束日期一起筛选。两端日期均包含在筛选内，也可只填写其中一端。编辑会保留原始时间。无可识别时间的旧记录会标记为「复制时间未知」，清除日期条件即可查看。Android 的复制提示会留在历史页底部，并累计本次打开期间成功复制的次数。
-
-历史和删除会在设备连接后同步，离线时的改动会在重连后合并。完全相同的文字或图片文件只保留最新一条。每端最多保留 100 条或 64 MiB 的内容。图片保存默认关闭，图片是否加入共享历史由产生它的设备的开关决定。已同步的图片会保存在各设备上。Android 退到后台时，本机剪贴板历史随已授权的自动发送一起记录。
+手动发送、接收剪贴板以及作为主机均可直接使用。要在其他应用中复制并自动发出，请启动 Shizuku，在剪贴板应用开启自动发送，再点「授权 Shizuku 后台同步」。没有可用的 Shizuku 服务时，自动读取会在剪贴板应用获得焦点时触发。开启截图与拍照自动发送需要允许读取照片。 [Shizuku 安装与启动指南](https://shizuku.rikka.app/guide/setup/)
 
 ## 跨网络连接
 
-1. 在电脑和手机安装 Tailscale 并加入同一个私有网络。 [Windows 安装说明](https://tailscale.com/docs/install/windows) · [Android 安装说明](https://tailscale.com/docs/install/android)
-2. 在 Windows 设置勾选「使用 Tailscale 监听」并保存。重新打开设置，记下显示的 Tailscale IPv4 地址。
-3. 在手机切到「公网模式」，填写该地址并保存。继续使用同一配对码。Tailscale 的连接在无法直连时可以走中继。 [直连与中继](https://tailscale.com/docs/reference/device-connectivity)
-4. 如果连接不上，检查两端是否在线，以及 Windows 防火墙是否允许手机访问 TCP `47832`。可将入站规则的远程地址限制为手机的 Tailscale 地址。切回局域网时，两端都关闭公网模式。
+- **Tailscale**：让设备加入同一个 Tailscale 私有网络。在 Windows 主机勾选「使用 Tailscale 监听」，将显示的地址和配对码填到 Android 客户端，并开启「公网模式」。 [Tailscale 安装指南](https://tailscale.com/download)
+- **TCP 内网映射**：关闭 Windows 的「使用 Tailscale 监听」。与剪贴板运行在同一台电脑上的 SakuraFrp 或 frpc 可将公网 TCP 端口转发到 `127.0.0.1:47832`。Android 客户端开启「公网模式」，填写公网地址及端口和原配对码。 [frp TCP 配置](https://gofrp.org/en/docs/features/tcp-udp/)
 
-## 用 TCP 内网映射跨网络连接
+设备连接使用 TLS 和配对码认证。配对码可用于加入主机，请仅分享给受信任的设备。两端应用内的「如何上手」也提供配对和连接步骤。
 
-1. Windows 关闭「使用 Tailscale 监听」并保存。
-2. 如果 SakuraFrp 或 frpc 与剪贴板运行在同一台电脑上，选择 TCP 隧道，将本地 IP 填为 `127.0.0.1`，端口填为 `47832`。切换 Wi-Fi 或重启电脑后可以继续使用此配置。如果映射由路由器或其他设备运行，本地 IP 填 Windows 剪贴板设置显示的局域网 IPv4。 [frp TCP 配置](https://gofrp.org/en/docs/features/tcp-udp/)
-3. 安卓打开「公网模式」，填入映射的公网 IP 或域名和端口，例如 `example.com:50001`，沿用原配对码并保存。若公网端口是 `47832`，可只填地址。手机可通过原有 VPN 访问该公网入口。
+## 从源码构建
 
-家中路由器有可入站的公网地址时可直接做端口转发。有运营商级 NAT 等入站限制时，需使用有公网 IP 的中继或提供 TCP 入口的映射服务。映射和防火墙配置由用户管理，连接仍使用剪贴板自己的 TLS 和配对码。
-
-## 测试范围
-
-
-后台收发测试使用 Android 10 和 Android 15 模拟器。测试覆盖 Shizuku 启用后在后台收发文字和图片，以及关闭自动发送后停止转发。Windows 本机测试覆盖隐藏浮窗后的剪贴板同步。安卓还测试了手动发送、截图和相机目录中新增图片的后台发送，以及浮窗拖动、缩放、收球与恢复。华为和小米的实体机及异地公网连接尚未实测。
+需要 Windows、PowerShell 7、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。先用 `./windows/build.ps1` 构建 Windows 版。Android 先运行 `./android/fetch-deps.ps1`，再运行 `./android/build.ps1`，通过 `-AndroidJar`、`-BuildTools` 和 `-Jdk` 指定相应路径。发布包由 GitHub Actions 在推送版本标签后自动构建。

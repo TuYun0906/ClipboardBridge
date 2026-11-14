@@ -70,6 +70,30 @@ static class HistoryCheck
             dated.Search("日期未知").Single().CopyTime != null)
             throw new Exception("Date filtering or original copy timestamp is incorrect");
         Console.WriteLine("PASS: inclusive local dates, keyword intersection, unknown time, and original time after edit");
+
+        string imagesPath = Path.Combine(args[0], "images");
+        var images = new ClipHistory(imagesPath);
+        var oldImage = new Frame(Wire.Image, Text(start).Id, new byte[] { 1, 2, 3 });
+        var newImage = new Frame(Wire.Image, Text(start + 1).Id, new byte[] { 1, 2, 3 });
+        var different = new Frame(Wire.Image, Text(start + 2).Id, new byte[] { 1, 2, 4 });
+        images.Apply(oldImage, false);
+        images.Apply(different, false);
+        var imageChanges = images.Apply(newImage, false);
+        images = new ClipHistory(imagesPath);
+        images.Apply(oldImage, false);
+        if (!imageChanges.Any(frame => frame.Kind == Wire.Delete && frame.Id.SequenceEqual(oldImage.Id)) ||
+            images.Search("").Length != 2 || !images.Search("").Any(entry => entry.Key == ClipHistory.Key(newImage.Id)))
+            throw new Exception("Identical images did not converge to the newest record");
+        File.Delete(Path.Combine(imagesPath, ClipHistory.Key(oldImage.Id) + ".deleted"));
+        using (var saved = File.Create(Path.Combine(imagesPath, ClipHistory.Key(oldImage.Id) + ".clip")))
+            Wire.Write(saved, oldImage);
+        images = new ClipHistory(imagesPath);
+        images.Apply(DatedText(start + 3, "文字图片"), true);
+        if (images.Search("图片", day, day, Wire.Image).Length != 2 ||
+            images.Search("图片", day, day, Wire.Text).Single().Text != "文字图片" ||
+            !images.Replay().Any(frame => frame.Kind == Wire.Delete && frame.Id.SequenceEqual(oldImage.Id)))
+            throw new Exception("History migration or content type filter failed");
+        Console.WriteLine("PASS: exact image deduplication, durable deletion, and content type filtering");
     }
 
     static Frame DatedText(long time, string text)

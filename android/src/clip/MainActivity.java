@@ -327,7 +327,10 @@ public final class MainActivity extends Activity {
         EditText query = field("搜索文字或图片", "");
         query.setBackground(Style.surface(this, Style.WHITE, 12));
         query.setSingleLine(true);
-        add(body, query, 0, dp(46));
+        LinearLayout search = new LinearLayout(this);
+        search.addView(query, new LinearLayout.LayoutParams(0, -1, 1));
+        add(body, search, 0, dp(46));
+        int[] filter = {0};
         LinearLayout dates = new LinearLayout(this);
         add(body, dates, 8, dp(44));
         LocalDate[] bounds = new LocalDate[2];
@@ -348,7 +351,7 @@ public final class MainActivity extends Activity {
         java.util.Set<String> selected = new java.util.HashSet<>();
         java.util.Map<String, Runnable> previews = new java.util.HashMap<>();
         java.util.Map<String, View> cards = new java.util.HashMap<>();
-        Runnable hideFeedback = () -> feedback.setVisibility(View.GONE);
+        int[] copyCount = {0};
         TextView cancel = Style.action(this, "取消多选", false, () -> { });
         TextView preview = Style.action(this, "预览", false, () -> {
             if (selected.size() != 1) return;
@@ -368,12 +371,13 @@ public final class MainActivity extends Activity {
             preview.setVisibility(selected.size() == 1 ? View.VISIBLE : View.GONE);
         };
         Runnable refresh = () -> {
-            String search = query.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
+            String term = query.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
             rows.removeAllViews();
             previews.clear();
             cards.clear();
             for (ClipHistory.Entry entry : entries) {
-                if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(search)) continue;
+                if (filter[0] != 0 && entry.kind != filter[0]) continue;
+                if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(term)) continue;
                 ZonedDateTime copied = entry.copiedAt == 0 ? null : Instant.ofEpochMilli(entry.copiedAt).atZone(zone);
                 LocalDate date = copied == null ? null : copied.toLocalDate();
                 if ((bounds[0] != null && (date == null || date.isBefore(bounds[0]))) ||
@@ -406,16 +410,18 @@ public final class MainActivity extends Activity {
                         updateSelection.run();
                         return;
                     }
-                    service.copyHistory(entry, result -> {
-                        if (!feedback.isAttachedToWindow() || !selected.isEmpty()) return;
-                        feedback.removeCallbacks(hideFeedback);
-                        feedback.setText(result);
+                    service.copyHistory(entry, copiedSuccessfully -> {
+                        if (!feedback.isAttachedToWindow()) return;
+                        if (!copiedSuccessfully) {
+                            Toast.makeText(this, "无法复制该记录", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        int count = ++copyCount[0];
+                        feedback.setText(count == 1 ? "已复制" : "已复制x" + count);
                         feedback.setVisibility(View.VISIBLE);
-                        feedback.postDelayed(hideFeedback, 1600);
                     });
                 });
                 card.setOnLongClickListener(view -> {
-                    hideFeedback.run();
                     selected.add(entry.key);
                     updateSelection.run();
                     return true;
@@ -433,6 +439,25 @@ public final class MainActivity extends Activity {
             selected.clear();
             refresh.run();
         };
+        TextView type = Style.action(this, "全部", false, () -> { });
+        type.setContentDescription("历史类型：全部");
+        LinearLayout.LayoutParams typeSize = new LinearLayout.LayoutParams(dp(72), -1);
+        typeSize.leftMargin = dp(8);
+        search.addView(type, typeSize);
+        type.setOnClickListener(view -> {
+            android.widget.PopupMenu menu = new android.widget.PopupMenu(this, type);
+            menu.getMenu().add(0, 0, 0, "全部");
+            menu.getMenu().add(0, Wire.TEXT, 1, "文字");
+            menu.getMenu().add(0, Wire.IMAGE, 2, "图片");
+            menu.setOnMenuItemClickListener(item -> {
+                filter[0] = item.getItemId();
+                type.setText(item.getTitle());
+                type.setContentDescription("历史类型：" + item.getTitle());
+                resetSelection.run();
+                return true;
+            });
+            menu.show();
+        });
         cancel.setOnClickListener(view -> {
             selected.clear();
             updateSelection.run();

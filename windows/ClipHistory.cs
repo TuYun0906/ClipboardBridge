@@ -10,6 +10,7 @@ internal sealed class ClipHistory
     {
         internal string Path, Label, Text, Key;
         internal byte Kind;
+        internal string ContentKey;
         internal DateTime? CopyTime;
     }
 
@@ -36,7 +37,7 @@ internal sealed class ClipHistory
             }
             catch (IOException) { }
         }
-        foreach (var group in entries.Values.Where(e => e.Kind == Wire.Text).GroupBy(e => e.Text).ToArray())
+        foreach (var group in entries.Values.GroupBy(e => new { e.Kind, e.ContentKey }).ToArray())
             foreach (var old in group.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).Skip(1)) Delete(old.Key);
         Trim();
     }
@@ -74,8 +75,7 @@ internal sealed class ClipHistory
             string path = Path.Combine(directory, key + ".clip");
             var entry = Describe(path, key, frame);
             var changes = new List<Frame>();
-            var duplicate = frame.Kind == Wire.Text
-                ? entries.Values.FirstOrDefault(e => e.Kind == Wire.Text && e.Text == entry.Text) : null;
+            var duplicate = entries.Values.FirstOrDefault(e => e.Kind == entry.Kind && e.ContentKey == entry.ContentKey);
             if (duplicate != null && String.CompareOrdinal(Order(duplicate.Key), Order(key)) > 0)
             {
                 if (Delete(key)) changes.Add(Tombstone(key));
@@ -117,12 +117,12 @@ internal sealed class ClipHistory
         }
     }
 
-    internal Entry[] Search(string query, DateTime? from = null, DateTime? through = null)
+    internal Entry[] Search(string query, DateTime? from = null, DateTime? through = null, byte? kind = null)
     {
         string term = query.Trim();
         lock (entries)
             return entries.Values.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal)
-                .Where(e => (!from.HasValue || e.CopyTime >= from.Value.Date) &&
+                .Where(e => (!kind.HasValue || e.Kind == kind.Value) && (!from.HasValue || e.CopyTime >= from.Value.Date) &&
                     (!through.HasValue || e.CopyTime.HasValue && e.CopyTime.Value.Date <= through.Value.Date) &&
                     e.Text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
     }
@@ -168,9 +168,14 @@ internal sealed class ClipHistory
         string label = text.Replace('\r', ' ').Replace('\n', ' ');
         if (label.Length > 160) label = label.Substring(0, 160) + "…";
         long? stamp = CopyTimestamp(key);
+        string contentKey = text;
+        if (frame.Kind == Wire.Image)
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                contentKey = Convert.ToBase64String(sha.ComputeHash(frame.Data));
         return new Entry
         {
             Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind,
+            ContentKey = contentKey,
             CopyTime = stamp.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(stamp.Value).LocalDateTime : (DateTime?)null
         };
     }

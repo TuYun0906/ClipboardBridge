@@ -77,6 +77,11 @@ internal sealed class MainWindow : Window
         heading.Margin = new Thickness(0, 0, 14, 0);
         heading.VerticalAlignment = VerticalAlignment.Center;
         searchRow.Children.Add(heading);
+        var type = new ComboBox { Width = 67, Height = 32, Margin = new Thickness(8, 0, 0, 0),
+            ItemsSource = new[] { "全部", "文字", "图片" }, SelectedIndex = 0 };
+        System.Windows.Automation.AutomationProperties.SetName(type, "历史类型");
+        DockPanel.SetDock(type, Dock.Right);
+        searchRow.Children.Add(type);
         var search = new TextBox { Height = 32, Padding = new Thickness(8, 4, 8, 4),
             ToolTip = "搜索历史文字或图片" };
         System.Windows.Automation.AutomationProperties.SetName(search, "搜索历史");
@@ -116,7 +121,8 @@ internal sealed class MainWindow : Window
                 items.Items.Add(Label("结束日期须在开始日期当天或之后", 14, Muted, false));
                 return;
             }
-            foreach (var entry in program.History.Search(search.Text, from.SelectedDate, through.SelectedDate))
+            byte? kind = type.SelectedIndex == 1 ? Wire.Text : type.SelectedIndex == 2 ? Wire.Image : (byte?)null;
+            foreach (var entry in program.History.Search(search.Text, from.SelectedDate, through.SelectedDate, kind))
             {
                 var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 48 };
                 var copy = Action("复制", false, () => program.CopyHistory(entry.Path));
@@ -157,6 +163,7 @@ internal sealed class MainWindow : Window
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
         };
         search.TextChanged += (sender, args) => refresh();
+        type.SelectionChanged += (sender, args) => refresh();
         from.SelectedDateChanged += (sender, args) => refresh();
         through.SelectedDateChanged += (sender, args) => refresh();
         program.HistoryChanged += refresh;

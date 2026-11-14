@@ -172,17 +172,17 @@ public final class SyncService extends Service {
         if (!changes.isEmpty()) sendBroadcast(new Intent(HISTORY).setPackage(getPackageName()));
     }
 
-    void copyHistory(ClipHistory.Entry entry, java.util.function.Consumer<String> callback) {
+    void copyHistory(ClipHistory.Entry entry, java.util.function.Consumer<Boolean> callback) {
         worker.post(() -> {
-            String result;
+            boolean result;
             try {
                 clipboard.apply(ClipHistory.read(entry.file));
-                result = "已复制";
+                result = true;
             } catch (IOException | RuntimeException error) {
-                result = "无法复制该记录";
+                result = false;
             }
-            String message = result;
-            main.post(() -> callback.accept(message));
+            boolean copied = result;
+            main.post(() -> callback.accept(copied));
         });
     }
 

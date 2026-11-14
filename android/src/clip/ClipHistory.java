@@ -33,9 +33,10 @@ final class ClipHistory {
             } catch (IOException ignored) { }
         }
         Set<String> texts = new HashSet<>();
+        Set<String> images = new HashSet<>();
         try {
             for (Entry entry : entries())
-                if (entry.kind == Wire.TEXT && !texts.add(entry.text)) delete(entry.key);
+                if (!(entry.kind == Wire.IMAGE ? images : texts).add(entry.contentKey)) delete(entry.key);
             trim(new ArrayList<>());
         } catch (IOException ignored) { }
     }
@@ -56,9 +57,10 @@ final class ClipHistory {
         File file = new File(folder, key + ".clip");
         Entry incoming = new Entry(file, key, frame);
         Entry duplicate = null;
-        if (frame.kind == Wire.TEXT) {
-            for (Entry entry : records.values()) {
-                if (entry.kind == Wire.TEXT && entry.text.equals(incoming.text)) { duplicate = entry; break; }
+        for (Entry entry : records.values()) {
+            if (entry.kind == incoming.kind && entry.contentKey.equals(incoming.contentKey)) {
+                duplicate = entry;
+                break;
             }
         }
         if (duplicate != null && order(duplicate.key).compareTo(order(key)) > 0) {
@@ -180,7 +182,7 @@ final class ClipHistory {
 
     static final class Entry {
         final File file;
-        final String key, text;
+        final String key, text, contentKey;
         final int kind;
         final long copiedAt;
         Entry(File file, String key, Wire.Frame frame) {
@@ -189,6 +191,16 @@ final class ClipHistory {
             kind = frame.kind;
             copiedAt = copyTime(key);
             text = kind == Wire.TEXT ? new String(frame.data, StandardCharsets.UTF_8) : "图片";
+            contentKey = kind == Wire.IMAGE ? imageDigest(frame.data) : text;
+        }
+    }
+
+    private static String imageDigest(byte[] data) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            return Base64.getEncoder().encodeToString(digest);
+        } catch (java.security.NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException(unavailable);
         }
     }
 }

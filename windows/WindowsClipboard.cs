@@ -50,26 +50,7 @@ internal sealed class WindowsClipboard : IDisposable
     {
         try
         {
-            IDataObject clipboard = Clipboard.GetDataObject();
-            if (clipboard != null && !clipboard.GetDataPresent(InternalFormat, false))
-            {
-                var image = clipboard.GetData(DataFormats.Bitmap) as BitmapSource;
-                if (image != null)
-                {
-                    ValidateDimensions(image);
-                    submit(DetachedBitmap(image));
-                }
-                else
-                {
-                    var png = clipboard.GetData("PNG", false) as MemoryStream;
-                    if (png != null && png.Length <= Wire.ImageLimit) submit(png.ToArray());
-                    else
-                    {
-                        string text = clipboard.GetData(DataFormats.UnicodeText) as string;
-                        if (!String.IsNullOrEmpty(text)) submit(text);
-                    }
-                }
-            }
+            ReadContent(Clipboard.GetDataObject(), submit);
         }
         catch (ExternalException)
         {
@@ -81,6 +62,86 @@ internal sealed class WindowsClipboard : IDisposable
             if (attempts == 0 || attempts >= 5) retry.Stop();
         }
         retry.Stop();
+    }
+
+    internal static void ReadContent(IDataObject clipboard, Action<object> submit)
+    {
+        if (clipboard == null || clipboard.GetDataPresent(InternalFormat, false)) return;
+
+        // Prefer encoded image data over Windows' converted bitmap.
+        foreach (string format in new[] { "PNG", "image/png", "JFIF", "image/jpeg" })
+        {
+            if (!clipboard.GetDataPresent(format, false)) continue;
+            var data = clipboard.GetData(format, false);
+            var stream = data as MemoryStream;
+            if (stream != null && stream.Length > Wire.ImageLimit) continue;
+            byte[] image = stream != null ? stream.ToArray() : data as byte[];
+            if (image == null || !IsStandardImage(image) || image.Length > Wire.ImageLimit) continue;
+            try
+            {
+                Decode(image);
+            }
+            catch (IOException) { continue; }
+            catch (FormatException) { continue; }
+            catch (NotSupportedException) { continue; }
+            submit(image);
+            return;
+        }
+
+        var files = clipboard.GetData(DataFormats.FileDrop, false) as string[];
+        if (files != null)
+        {
+            foreach (string path in files)
+            {
+                if (String.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+                switch (Path.GetExtension(path).ToLowerInvariant())
+                {
+                    case ".png": case ".jpg": case ".jpeg": case ".bmp":
+                    case ".gif": case ".tif": case ".tiff":
+                        submit(new FileInfo(path));
+                        break;
+                }
+            }
+            return;
+        }
+
+        var bitmap = clipboard.GetData(DataFormats.Bitmap) as BitmapSource;
+        if (bitmap != null)
+        {
+            ValidateDimensions(bitmap);
+            submit(DetachClipboardBitmap(bitmap));
+            return;
+        }
+        string text = clipboard.GetData(DataFormats.UnicodeText) as string;
+        if (!String.IsNullOrEmpty(text)) submit(text);
+    }
+
+    private static BitmapSource DetachClipboardBitmap(BitmapSource bitmap)
+    {
+        if (bitmap.Format != PixelFormats.Bgra32) return DetachedBitmap(bitmap);
+
+        // Some CF_BITMAP producers leave the unused alpha byte at zero.
+        // Only reinterpret it when every pixel has zero alpha and RGB is present.
+        var line = new byte[bitmap.PixelWidth * 4];
+        bool hasColor = false;
+        for (int y = 0; y < bitmap.PixelHeight; y++)
+        {
+            bitmap.CopyPixels(new Int32Rect(0, y, bitmap.PixelWidth, 1), line, line.Length, 0);
+            for (int x = 0; x < line.Length; x += 4)
+            {
+                if (line[x + 3] != 0) return DetachedBitmap(bitmap);
+                if ((line[x] | line[x + 1] | line[x + 2]) != 0) hasColor = true;
+            }
+        }
+        if (!hasColor) return DetachedBitmap(bitmap);
+
+        int stride = line.Length;
+        byte[] pixels = new byte[stride * bitmap.PixelHeight];
+        bitmap.CopyPixels(pixels, stride, 0);
+        var opaque = BitmapSource.Create(bitmap.PixelWidth, bitmap.PixelHeight,
+            bitmap.DpiX, bitmap.DpiY, PixelFormats.Bgr32, null, pixels, stride);
+        opaque.Freeze();
+        return opaque;
     }
 
     private static byte[] NewId()

@@ -16,6 +16,52 @@ internal static class WindowsAppCheck
         catch (Exception error) { Console.Error.WriteLine(error.Message); Environment.ExitCode = 1; }
     }
 
+    private static void CheckClipboardFormats(string path)
+    {
+        string imagePath = Path.Combine(path, "copied.png");
+        byte[] pixel = { 37, 82, 210, 255 };
+        byte[] png = WindowsClipboard.ToFrame(System.Windows.Media.Imaging.BitmapSource.Create(
+            1, 1, 96, 96, PixelFormats.Bgra32, null, pixel, 4)).Data;
+        File.WriteAllBytes(imagePath, png);
+        string secondImagePath = Path.Combine(path, "second.png");
+        File.WriteAllBytes(secondImagePath, png);
+        string textPath = Path.Combine(path, "ignored.txt");
+        File.WriteAllText(textPath, "ignore");
+        var drop = new DataObject(DataFormats.FileDrop, new[] { imagePath, textPath, secondImagePath });
+        var captures = new System.Collections.Generic.List<object>();
+        WindowsClipboard.ReadContent(drop, captures.Add);
+        if (!captures.OfType<FileInfo>().Select(file => file.FullName).SequenceEqual(new[] { imagePath, secondImagePath })
+                || captures.Count != 2)
+            throw new Exception("FileDrop did not select both image files in order");
+        foreach (object capture in captures) CheckPixel(WindowsClipboard.ToFrame(capture).Data, pixel);
+
+        var legacy = System.Windows.Media.Imaging.BitmapSource.Create(
+            1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { 37, 82, 210, 0 }, 4);
+        var mixed = new DataObject(DataFormats.Bitmap, legacy);
+        mixed.SetData("PNG", new MemoryStream(png, false), false);
+        captures.Clear();
+        WindowsClipboard.ReadContent(mixed, captures.Add);
+        CheckPixel(WindowsClipboard.ToFrame(captures.Single()).Data, pixel);
+
+        captures.Clear();
+        WindowsClipboard.ReadContent(new DataObject(DataFormats.Bitmap, legacy), captures.Add);
+        CheckPixel(WindowsClipboard.ToFrame(captures.Single()).Data, pixel);
+        captures.Clear();
+        var internalImage = WindowsClipboard.ToClipboardData(new Frame(Wire.Image, new byte[Wire.IdSize], png));
+        WindowsClipboard.ReadContent(internalImage, captures.Add);
+        if (captures.Count != 0) throw new Exception("Received image was captured again");
+        Console.WriteLine("PASS: clipboard image files, PNG preference and legacy bitmap alpha");
+    }
+
+    private static void CheckPixel(byte[] image, byte[] expected)
+    {
+        var decoded = new System.Windows.Media.Imaging.FormatConvertedBitmap(
+            WindowsClipboard.DecodePreview(image, 8), PixelFormats.Bgra32, null, 0);
+        byte[] actual = new byte[4];
+        decoded.CopyPixels(actual, 4, 0);
+        if (!actual.SequenceEqual(expected)) throw new Exception("Copied image pixels were lost");
+    }
+
     private static void Check(string path)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -45,6 +91,7 @@ internal static class WindowsAppCheck
             throw new Exception("Compression provenance does not match actual output");
         if (alpha.Data[0] != 137) throw new Exception("Compression lost transparency");
         Console.WriteLine("PASS: compression reduces photo bytes and preserves transparency");
+        CheckClipboardFormats(path);
         using (var program = new Program(app, path))
         {
             var window = app.Windows.OfType<MainWindow>().Single();

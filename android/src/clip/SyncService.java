@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -21,7 +22,8 @@ public final class SyncService extends Service {
     static final String HISTORY = "clip.bridge.HISTORY";
     static final String STATUS = "clip.bridge.SYNC_STATUS";
     private static final String CHANNEL = "clipboard_link";
-    private static final int NOTICE = 11;
+    private static final String IMAGE_NOTICE_CHANNEL = "clipboard_image_sent";
+    private static final int NOTICE = 11, IMAGE_NOTICE = 12;
     static SyncService running;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable refresh = this::applySettings;
@@ -92,6 +94,14 @@ public final class SyncService extends Service {
         NotificationManager notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel(CHANNEL, "剪贴板同步",
                 NotificationManager.IMPORTANCE_LOW));
+        if (useImageNotification()) {
+            NotificationChannel sent = new NotificationChannel(IMAGE_NOTICE_CHANNEL, "图片发送提示",
+                    NotificationManager.IMPORTANCE_HIGH);
+            sent.setSound(null, null);
+            sent.enableVibration(false);
+            sent.setShowBadge(false);
+            notifications.createNotificationChannel(sent);
+        }
         startForeground(NOTICE, notification());
         getSystemService(android.net.ConnectivityManager.class).registerNetworkCallback(
                 new android.net.NetworkRequest.Builder()
@@ -245,10 +255,7 @@ public final class SyncService extends Service {
             record(frame, true);
             if (!transmit) return;
             main.post(() -> {
-                Runnable delivered = confirmCapture ? () -> main.post(() -> {
-                    if (!destroyed) android.widget.Toast.makeText(this, "发送图片成功",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                }) : null;
+                Runnable delivered = confirmCapture ? () -> main.post(this::showImageSent) : null;
                 if (host != null) host.submit(frame, delivered);
                 else if (client != null) client.submit(frame, delivered);
                 else android.widget.Toast.makeText(this, hosting ? "Android 主机尚未启动" : "请先填写主机地址和配对码",
@@ -385,6 +392,31 @@ public final class SyncService extends Service {
         status = value;
         getSystemService(NotificationManager.class).notify(NOTICE, notification());
         sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
+    }
+
+    private static boolean useImageNotification() {
+        return Build.VERSION.SDK_INT < 30 || "huawei".equalsIgnoreCase(Build.MANUFACTURER) ||
+                "huawei".equalsIgnoreCase(Build.BRAND);
+    }
+
+    private void showImageSent() {
+        if (destroyed) return;
+        NotificationManager notifications = getSystemService(NotificationManager.class);
+        NotificationChannel channel = useImageNotification()
+                ? notifications.getNotificationChannel(IMAGE_NOTICE_CHANNEL) : null;
+        if (channel != null && channel.getImportance() != NotificationManager.IMPORTANCE_NONE &&
+                notifications.areNotificationsEnabled()) {
+            int icon = getResources().getIdentifier("clip_icon", "drawable", getPackageName());
+            try {
+                notifications.notify(IMAGE_NOTICE, new Notification.Builder(this, IMAGE_NOTICE_CHANNEL)
+                        .setSmallIcon(icon).setContentTitle("发送图片成功").setTimeoutAfter(4500)
+                        .setShowWhen(false).setVisibility(Notification.VISIBILITY_PRIVATE).build());
+                return;
+            } catch (SecurityException ignored) {
+                // Permission may have changed since the check above.
+            }
+        }
+        android.widget.Toast.makeText(this, "发送图片成功", android.widget.Toast.LENGTH_SHORT).show();
     }
 
     private Notification notification() {

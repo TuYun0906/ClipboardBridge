@@ -25,7 +25,7 @@ internal sealed class MainWindow : Window
     internal MainWindow(Program program)
     {
         this.program = program;
-        Title = "剪贴板";
+        Title = "跨设备剪贴板";
         FontFamily = UiFont;
         Width = 560;
         Height = 530;
@@ -197,7 +197,7 @@ internal sealed class MainWindow : Window
         AddHelpSection(body, "Android 后台同步", "先安装并启动 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         AddHelpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         AddHelpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络。在电脑开启公网模式并保存，记下显示的 Tailscale 地址。安卓端也切到公网模式，填写这个地址和原来的配对码，再保存连接。");
-        AddHelpSection(body, "内网映射连接", "电脑关闭 Tailscale 模式。用映射工具将公网 TCP 端口转发至设置显示的局域网地址和端口 47832。安卓开启公网模式，填写映射的公网地址和端口，再用原配对码保存。");
+        AddHelpSection(body, "内网映射连接", "电脑关闭「使用 Tailscale 监听」。同一台电脑上的 SakuraFrp 等工具可把公网 TCP 端口转发到 127.0.0.1:47832。若映射工具在其他设备上，填写电脑的局域网地址和端口 47832。安卓开启公网模式，填写映射的公网地址和端口，再用原配对码保存。");
         AddHelpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
         var shell = new DockPanel { Background = BackgroundColor, Margin = new Thickness(0) };
         var close = Action("关闭", false, dialog.Close);

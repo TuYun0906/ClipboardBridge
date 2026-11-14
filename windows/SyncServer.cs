@@ -12,6 +12,8 @@ internal sealed class SyncServer : IDisposable
 {
     private const int MaxPairingAttempts = 16;
     private readonly TcpListener listener;
+    private TcpListener loopback;
+    private readonly bool includeLoopback;
     private readonly Identity identity;
     private readonly Action<Frame, Action<Frame>> receive;
     private readonly Action<bool> status;
@@ -37,12 +39,13 @@ internal sealed class SyncServer : IDisposable
     }
 
     internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame, Action<Frame>> receive,
-        Action<bool> status, Func<IEnumerable<Frame>> replay = null)
+        Action<bool> status, Func<IEnumerable<Frame>> replay = null, bool includeLoopback = false)
     {
         this.identity = identity;
         this.receive = receive;
         this.status = status;
         this.replay = replay;
+        this.includeLoopback = includeLoopback && !IPAddress.Loopback.Equals(address);
         listener = new TcpListener(address, port);
     }
 
@@ -50,8 +53,20 @@ internal sealed class SyncServer : IDisposable
     {
         listener.Start(4);
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        new Thread(AcceptLoop) { IsBackground = true, Name = "Clipboard listener" }.Start();
+        if (includeLoopback)
+        {
+            loopback = new TcpListener(IPAddress.Loopback, port);
+            try { loopback.Start(4); }
+            catch (SocketException) { listener.Stop(); throw; }
+            StartAccepting(loopback);
+        }
+        StartAccepting(listener);
         return port;
+    }
+
+    private void StartAccepting(TcpListener source)
+    {
+        new Thread(() => AcceptLoop(source)) { IsBackground = true, Name = "Clipboard listener" }.Start();
     }
 
     internal void Publish(Frame frame) { Publish(frame, null); }
@@ -87,12 +102,12 @@ internal sealed class SyncServer : IDisposable
         }
     }
 
-    private void AcceptLoop()
+    private void AcceptLoop(TcpListener source)
     {
         while (true)
         {
             TcpClient incoming;
-            try { incoming = listener.AcceptTcpClient(); }
+            try { incoming = source.AcceptTcpClient(); }
             catch (SocketException) { return; }
             catch (ObjectDisposedException) { return; }
             catch (InvalidOperationException) { return; }
@@ -224,6 +239,7 @@ internal sealed class SyncServer : IDisposable
             if (closed) return;
             closed = true;
             listener.Stop();
+            if (loopback != null) loopback.Stop();
             foreach (Peer peer in peers) peer.Socket.Close();
             pending = null;
         }

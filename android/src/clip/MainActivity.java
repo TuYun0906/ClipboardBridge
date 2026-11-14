@@ -122,7 +122,7 @@ public final class MainActivity extends Activity {
         root.setFocusableInTouchMode(true);
         scroll.addView(root);
 
-        TextView title = Style.label(this, "剪贴板", 32, Style.INK, true);
+        TextView title = Style.label(this, "跨设备剪贴板", 32, Style.INK, true);
         root.addView(title);
         status = Style.label(this, "等待连接", 14, Style.BLUE, true);
         add(root, status, 6, -2);
@@ -295,7 +295,7 @@ public final class MainActivity extends Activity {
         helpSection(body, "Shizuku 后台同步", "安装 Shizuku。Android 10 用 USB 和电脑上的 ADB 启动。Android 11 及以上可在 Shizuku 里使用无线调试配对并启动。回到剪贴板，开启自动发送并授权 Shizuku。");
         helpLink(body, "查看 Shizuku 启动步骤", "https://shizuku.rikka.app/guide/setup/");
         helpSection(body, "Tailscale 公网连接", "让两端加入同一个 Tailscale 网络，并都开启公网模式。把 Windows 设置中显示的 Tailscale 地址和原配对码填到安卓端，再保存连接。");
-        helpSection(body, "内网映射连接", "在电脑关闭 Tailscale 模式，用映射工具把公网 TCP 端口转发到电脑设置中显示的局域网地址和端口 47832。安卓开启公网模式，填入映射的公网 IP 或域名及端口，再用原配对码保存。");
+        helpSection(body, "内网映射连接", "电脑关闭「使用 Tailscale 监听」。同一台电脑上的映射工具可把公网 TCP 端口转发到 127.0.0.1:47832。安卓开启公网模式，填入映射的公网 IP 或域名及端口，再用原配对码保存。");
         helpLink(body, "查看 Tailscale 安装说明", "https://tailscale.com/download");
         LinearLayout panel = dialogBody("如何上手");
         add(panel, scroll, 0, Math.min(dp(360), getResources().getDisplayMetrics().heightPixels / 2));

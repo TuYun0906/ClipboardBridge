@@ -26,9 +26,13 @@ internal static class HistorySyncServerCheck
                 if (frame.Kind == Wire.HistoryText) frame = new Frame(Wire.Text, frame.Id, frame.Data);
                 foreach (Frame change in history.Apply(frame, false)) relay(change);
             };
-            using (server = new SyncServer(IPAddress.Loopback, 0, identity, receive, connected => { }, history.Replay))
+            var alternateAddress = IPAddress.Parse("127.0.0.2");
+            using (server = new SyncServer(alternateAddress, 0, identity, receive, connected => { }, history.Replay,
+                includeLoopback: true))
             {
-                Console.WriteLine(server.Start() + " " + identity.PairingCode);
+                int port = server.Start();
+                using (var probe = new System.Net.Sockets.TcpClient()) probe.Connect(alternateAddress, port);
+                Console.WriteLine(port + " " + identity.PairingCode);
                 Console.ReadLine();
             }
         }

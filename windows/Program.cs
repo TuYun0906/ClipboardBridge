@@ -53,7 +53,7 @@ internal sealed class Program : IDisposable
         {
             if (!first)
             {
-                MessageBox.Show("剪贴板已在运行，可从系统托盘打开。", "剪贴板");
+                MessageBox.Show("跨设备剪贴板已在运行，可从系统托盘打开。", "跨设备剪贴板");
                 return;
             }
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -96,7 +96,7 @@ internal sealed class Program : IDisposable
         menu.Items.Add("退出", null, delegate { exiting = true; app.Shutdown(); });
         tray = new Forms.NotifyIcon
         {
-            Text = "剪贴板", Icon = trayIcon, ContextMenuStrip = menu, Visible = true
+            Text = "跨设备剪贴板", Icon = trayIcon, ContextMenuStrip = menu, Visible = true
         };
         tray.MouseClick += (sender, args) => { if (args.Button == Forms.MouseButtons.Left) SetVisible(true); };
         NetworkChange.NetworkAddressChanged += NetworkChanged;
@@ -284,19 +284,19 @@ internal sealed class Program : IDisposable
         if (server != null) server.Dispose();
         server = null;
         address = selected;
-        if (address == null)
+        if (address == null && PublicMode)
         {
-            SetStatus(PublicMode ? "等待 Tailscale 网络" : "等待局域网");
+            SetStatus("等待 Tailscale 网络");
             return;
         }
         SyncServer next = null;
         try
         {
-            next = new SyncServer(address, Port, identity, Receive, connected =>
+            next = new SyncServer(address ?? IPAddress.Loopback, Port, identity, Receive, connected =>
                 app.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (server == next) SetStatus(connected ? "已连接" : "等待手机连接");
-                })), History.Replay);
+                })), History.Replay, includeLoopback: !PublicMode);
             server = next;
             next.Start();
             SetStatus("等待手机连接");

@@ -1,4 +1,4 @@
-# 剪贴板 · 0.4.9
+# 跨设备剪贴板 · 0.4.10
 
 Windows 便携版与 Android 安装包在 [Releases](https://github.com/TuYun0906/ClipboardBridge/releases) 下载。
 
@@ -53,8 +53,8 @@ Android 选中一条后，底部「预览」可打开文字编辑或在卡片内
 
 ## 用 TCP 内网映射跨网络连接
 
-1. Windows 关闭「使用 Tailscale 监听」，保存后重新打开设置，记下显示的局域网 IPv4。
-2. 在路由器或映射工具上，把公网 TCP 端口转发到该 IPv4 的 `47832` 端口。使用 frp 时，选择 `type = "tcp"`，把 `localIP` 设为该 IPv4、`localPort` 设为 `47832`，`remotePort` 设为分配的公网端口。映射需要原样转发 TCP 数据。 [frp TCP 配置](https://gofrp.org/en/docs/features/tcp-udp/)
+1. Windows 关闭「使用 Tailscale 监听」并保存。
+2. 如果 SakuraFrp 或 frpc 与剪贴板运行在同一台电脑上，选择 TCP 隧道，将本地 IP 填为 `127.0.0.1`，端口填为 `47832`。切换 Wi-Fi 或重启电脑后可以继续使用此配置。如果映射由路由器或其他设备运行，本地 IP 填 Windows 剪贴板设置显示的局域网 IPv4。 [frp TCP 配置](https://gofrp.org/en/docs/features/tcp-udp/)
 3. 安卓打开「公网模式」，填入映射的公网 IP 或域名和端口，例如 `example.com:50001`，沿用原配对码并保存。若公网端口是 `47832`，可只填地址。手机可通过原有 VPN 访问该公网入口。
 
 家中路由器有可入站的公网地址时可直接做端口转发。有运营商级 NAT 等入站限制时，需使用有公网 IP 的中继或提供 TCP 入口的映射服务。映射和防火墙配置由用户管理，连接仍使用剪贴板自己的 TLS 和配对码。

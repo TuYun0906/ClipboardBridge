@@ -49,6 +49,8 @@ internal static class AndroidHostCheck
             Check(received, Wire.Text, "Android copy");
             client.Publish(Make(Wire.HistoryText, 2, "edited history"));
             Check(received, Wire.Text, "edit received");
+            client.Publish(Make(Wire.HistoryText, 7, "test done"));
+            Check(received, Wire.HistoryText, "test done");
         }
     }
 
@@ -64,7 +66,7 @@ internal static class AndroidHostCheck
         Frame frame;
         do
         {
-            if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind);
+            if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind + ": " + text);
         } while (frame.Kind == Wire.Delete);
         if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text ||
             (kind == Wire.Image && Wire.IsCompressed(frame.Id) != (text == "host image 22")))

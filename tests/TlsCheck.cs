@@ -50,7 +50,12 @@ static class TlsCheck
                         if (latest.Kind != Wire.Text || Encoding.UTF8.GetString(latest.Data) != "新")
                             throw new Exception("Latest content was not sent");
                         if (attempt == 0) continue;
+                        Frame capture = link.Read();
+                        if (capture.Kind != Wire.Image || capture.Id[0] != 3)
+                            throw new Exception("Expected queued capture");
                         link.Send(new Frame(Wire.Ack, latest.Id, new byte[0]));
+                        link.Send(new Frame(Wire.Ack, capture.Id, new byte[0]));
+                        link.Send(new Frame(Wire.Ack, capture.Id, new byte[0]));
                         byte[] id = Guid.NewGuid().ToByteArray();
                         link.Send(new Frame(Wire.Text, id, Encoding.UTF8.GetBytes("已收到")));
                         Frame confirmation = link.Read();

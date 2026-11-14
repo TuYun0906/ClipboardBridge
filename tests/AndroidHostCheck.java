@@ -63,6 +63,10 @@ public final class AndroidHostCheck {
                 check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "edited history");
                 check(peer.read(), Wire.HISTORY_TEXT, "edited history");
                 host.submit(frame(Wire.TEXT, 6, "edit received"));
+                check(peer.read(), Wire.TEXT, "edit received");
+                check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "test done");
+                host.publish(frame(Wire.HISTORY_TEXT, 7, "test done"));
+                check(peer.read(), Wire.HISTORY_TEXT, "test done");
             }
         }
     }

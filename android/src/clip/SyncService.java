@@ -55,10 +55,16 @@ public final class SyncService extends Service {
     private String endpoint;
     private String token;
     private boolean internet;
+    private static final String IMAGE_SENT = "发送图片成功";
     private String status = "等待连接";
+    private long lastImageSentAt;
 
     static void start(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
-    String status() { return status; }
+    String status() {
+        if (lastImageSentAt == 0) return status;
+        String time = android.text.format.DateFormat.getTimeFormat(this).format(new java.util.Date(lastImageSentAt));
+        return status + " · " + IMAGE_SENT + " " + time;
+    }
     String hostPairingCode() { return host == null || hostIdentity == null ? "" : hostIdentity.code; }
 
     String hostAddress() {
@@ -401,7 +407,15 @@ public final class SyncService extends Service {
 
     private void showImageSent() {
         if (destroyed) return;
+        lastImageSentAt = System.currentTimeMillis();
+        sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
         NotificationManager notifications = getSystemService(NotificationManager.class);
+        android.util.Log.d("ClipDelivery", "Capture acknowledged; updating sync status");
+        try {
+            notifications.notify(NOTICE, notification());
+        } catch (SecurityException ignored) {
+            // The result remains visible on the app's main screen.
+        }
         NotificationChannel channel = useImageNotification()
                 ? notifications.getNotificationChannel(IMAGE_NOTICE_CHANNEL) : null;
         if (channel != null && channel.getImportance() != NotificationManager.IMPORTANCE_NONE &&
@@ -409,14 +423,14 @@ public final class SyncService extends Service {
             int icon = getResources().getIdentifier("clip_icon", "drawable", getPackageName());
             try {
                 notifications.notify(IMAGE_NOTICE, new Notification.Builder(this, IMAGE_NOTICE_CHANNEL)
-                        .setSmallIcon(icon).setContentTitle("发送图片成功").setTimeoutAfter(4500)
+                        .setSmallIcon(icon).setContentTitle(IMAGE_SENT).setTimeoutAfter(4500)
                         .setShowWhen(false).setVisibility(Notification.VISIBILITY_PRIVATE).build());
                 return;
             } catch (SecurityException ignored) {
                 // Permission may have changed since the check above.
             }
         }
-        android.widget.Toast.makeText(this, "发送图片成功", android.widget.Toast.LENGTH_SHORT).show();
+        android.widget.Toast.makeText(this, IMAGE_SENT, android.widget.Toast.LENGTH_SHORT).show();
     }
 
     private Notification notification() {
@@ -424,7 +438,8 @@ public final class SyncService extends Service {
         PendingIntent pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
         int icon = getResources().getIdentifier("clip_icon", "drawable", getPackageName());
         return new Notification.Builder(this, CHANNEL)
-                .setContentTitle("剪贴板同步").setContentText(status).setSmallIcon(icon)
+                .setContentTitle("剪贴板同步").setContentText(status()).setSmallIcon(icon)
+                .setStyle(new Notification.BigTextStyle().bigText(status()))
                 .setContentIntent(pending).setOngoing(true).setOnlyAlertOnce(true).build();
     }
 }

@@ -35,7 +35,7 @@ public final class MainActivity extends Activity {
     private static final int IMAGE = 31, MEDIA = 32, NOTICE = 33;
     private SharedPreferences prefs;
     private ClipboardManager clipboard;
-    private TextView status, mediaHint, authorize;
+    private TextView status, mediaHint, authorize, bannerPermission;
     private EditText host, pair;
     private TextView hostAddress, hostCode;
     private Switch media, internet, auto;
@@ -83,6 +83,7 @@ public final class MainActivity extends Activity {
         updating = true;
         media.setChecked(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
         updating = false;
+        refreshBannerPermission();
     }
 
     @Override protected void onStop() {
@@ -217,6 +218,11 @@ public final class MainActivity extends Activity {
                 } else requestPermissions(new String[]{Prefs.mediaPermission()}, MEDIA);
             } else enableMedia(enabled);
         });
+        if (SyncService.useImageNotification()) {
+            bannerPermission = Style.action(this, "允许显示底部发送提示", false, this::openBannerPermission);
+            add(options, bannerPermission, 6, dp(42));
+            refreshBannerPermission();
+        }
         mediaHint = Style.label(this, "✓ 已开启截图与拍照同步", 13, Style.BLUE, true);
         mediaHint.setVisibility(View.GONE);
         options.addView(mediaHint);
@@ -256,11 +262,27 @@ public final class MainActivity extends Activity {
         return publicMode ? "Tailscale 地址或映射地址:端口" : "电脑的局域网地址";
     }
 
+    private void refreshBannerPermission() {
+        if (bannerPermission == null) return;
+        boolean needed = media.isChecked() && !android.provider.Settings.canDrawOverlays(this);
+        bannerPermission.setVisibility(needed ? View.VISIBLE : View.GONE);
+    }
+
+    private void openBannerPermission() {
+        Intent settings = new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+        try { startActivity(settings); }
+        catch (android.content.ActivityNotFoundException unavailable) {
+            Toast.makeText(this, "请在系统设置中允许跨设备剪贴板显示悬浮窗", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void enableMedia(boolean enabled) {
         prefs.edit().putBoolean(Prefs.MEDIA, enabled).apply();
         updating = true;
         media.setChecked(enabled);
         updating = false;
+        refreshBannerPermission();
         if (!enabled) return;
         mediaHint.animate().cancel();
         mediaHint.setVisibility(View.VISIBLE);

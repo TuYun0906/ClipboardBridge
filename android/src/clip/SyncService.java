@@ -58,6 +58,7 @@ public final class SyncService extends Service {
     private static final String IMAGE_SENT = "发送图片成功";
     private String status = "等待连接";
     private long lastImageSentAt;
+    private final ImageSentBanner imageBanner = new ImageSentBanner(this);
 
     static void start(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
     String status() {
@@ -127,6 +128,7 @@ public final class SyncService extends Service {
         getSystemService(android.net.ConnectivityManager.class).unregisterNetworkCallback(networkChanges);
         prefs.unregisterOnSharedPreferenceChangeListener(changes);
         main.removeCallbacksAndMessages(null);
+        imageBanner.dismiss();
         if (client != null) client.close();
         if (host != null) host.close();
         background.close();
@@ -400,7 +402,7 @@ public final class SyncService extends Service {
         sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
     }
 
-    private static boolean useImageNotification() {
+    static boolean useImageNotification() {
         return Build.VERSION.SDK_INT < 30 || "huawei".equalsIgnoreCase(Build.MANUFACTURER) ||
                 "huawei".equalsIgnoreCase(Build.BRAND);
     }
@@ -416,6 +418,7 @@ public final class SyncService extends Service {
         } catch (SecurityException ignored) {
             // The result remains visible on the app's main screen.
         }
+        if (useImageNotification() && imageBanner.show(IMAGE_SENT)) return;
         NotificationChannel channel = useImageNotification()
                 ? notifications.getNotificationChannel(IMAGE_NOTICE_CHANNEL) : null;
         if (channel != null && channel.getImportance() != NotificationManager.IMPORTANCE_NONE &&

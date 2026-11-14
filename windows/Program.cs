@@ -20,6 +20,8 @@ internal sealed class Program : IDisposable
     private const int Port = 47832;
     private readonly Application app;
     private readonly string settingsPath;
+    private readonly string historyPageSizePath;
+    internal int HistoryPageSize { get; private set; }
     private readonly Identity identity;
     private readonly MainWindow window;
     private readonly Forms.NotifyIcon tray;
@@ -83,6 +85,10 @@ internal sealed class Program : IDisposable
     {
         this.app = app;
         settingsPath = Path.Combine(directory, "settings.txt");
+        historyPageSizePath = Path.Combine(directory, "history-page-size.txt");
+        int size;
+        HistoryPageSize = File.Exists(historyPageSizePath) && Int32.TryParse(File.ReadAllText(historyPageSizePath), out size) &&
+            size >= 1 && size <= 100 ? size : 50;
         identity = Identity.Open(Path.Combine(directory, "identity.bin"));
         string options = File.Exists(settingsPath) ? File.ReadAllText(settingsPath) : "001";
         string[] lines = options.Replace("\r", "").Split('\n');
@@ -152,6 +158,14 @@ internal sealed class Program : IDisposable
         catch (IOException) { SetStatus("无法保存设置"); }
         catch (UnauthorizedAccessException) { SetStatus("无法保存设置"); }
         catch (System.Security.Cryptography.CryptographicException) { SetStatus("无法保存连接设置"); }
+    }
+
+    internal void SetHistoryPageSize(int size)
+    {
+        HistoryPageSize = size;
+        try { File.WriteAllText(historyPageSizePath, size.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
+        catch (IOException) { SetStatus("无法保存每页条数"); }
+        catch (UnauthorizedAccessException) { SetStatus("无法保存每页条数"); }
     }
 
     internal void SetVisible(bool visible)

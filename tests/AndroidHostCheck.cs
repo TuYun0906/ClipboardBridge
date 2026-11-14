@@ -41,7 +41,7 @@ internal static class AndroidHostCheck
             for (byte i = 11; i <= 13; i++)
             {
                 Frame image = Make(Wire.Image, i, "image " + i);
-                if (i == 12) Wire.MarkCompressed(image.Id);
+                if (i == 12) Wire.MarkCompressed(image.Id, 70, 100);
                 client.Submit(image);
             }
             for (int i = 21; i <= 23; i++) Check(received, Wire.Image, "host image " + i);
@@ -69,7 +69,7 @@ internal static class AndroidHostCheck
             if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind + ": " + text);
         } while (frame.Kind == Wire.Delete);
         if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text ||
-            (kind == Wire.Image && Wire.IsCompressed(frame.Id) != (text == "host image 22")))
+            (kind == Wire.Image && Wire.CompressionPercent(frame.Id) != (text == "host image 22" ? 70 : -1)))
             throw new Exception("Expected " + text + "; got " + frame.Kind + ": " + Encoding.UTF8.GetString(frame.Data));
     }
 }

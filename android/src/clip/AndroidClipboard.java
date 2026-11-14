@@ -116,7 +116,7 @@ final class AndroidClipboard {
             if (compress && !"gif".equals(format)) {
                 byte[] candidate = compress(data, bounds);
                 if (candidate != null && candidate.length < data.length) {
-                    Wire.markCompressed(imageId);
+                    Wire.markCompressed(imageId, candidate.length, data.length);
                     return candidate;
                 }
             }

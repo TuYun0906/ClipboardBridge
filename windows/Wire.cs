@@ -22,9 +22,26 @@ internal static class Wire
     // IDs carry image provenance through live sync, history replay, and older peers.
     private static readonly byte[] CompressedMark = { 0xC1, 0x19, 0x3B, 0xA6, 0x5D };
     internal static void MarkCompressed(byte[] id) { Array.Copy(CompressedMark, 0, id, 6, CompressedMark.Length); }
-    internal static bool IsCompressed(byte[] id)
+    private static readonly byte[] RatioMark = { 0xC1, 0x19, 0x3B, 0xA7, 0x5E };
+
+    internal static void MarkCompressed(byte[] id, int remainingBytes, int originalBytes)
     {
-        for (int i = 0; i < CompressedMark.Length; i++) if (id[6 + i] != CompressedMark[i]) return false;
+        Array.Copy(RatioMark, 0, id, 6, RatioMark.Length);
+        id[11] = (byte)Math.Max(1, Math.Min(99, (100L * remainingBytes + originalBytes / 2) / originalBytes));
+    }
+
+    // -1 means an original image, 0 means an older compressed image with no known ratio.
+    internal static int CompressionPercent(byte[] id)
+    {
+        if (HasMark(id, RatioMark) && id[11] >= 1 && id[11] <= 99) return id[11];
+        return HasMark(id, CompressedMark) ? 0 : -1;
+    }
+
+    internal static bool IsCompressed(byte[] id) { return CompressionPercent(id) >= 0; }
+
+    private static bool HasMark(byte[] id, byte[] mark)
+    {
+        for (int i = 0; i < mark.Length; i++) if (id[6 + i] != mark[i]) return false;
         return true;
     }
 

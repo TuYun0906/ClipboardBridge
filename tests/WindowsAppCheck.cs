@@ -195,6 +195,32 @@ internal static class WindowsAppCheck
             if (Math.Abs(image.Width - width) > 0.1) throw new Exception("Image zoom did not reverse");
             imageWindow.Close();
             Console.WriteLine("PASS: text and image double-click previews, full text and mouse wheel zoom");
+            var marked = WindowsClipboard.ToFrame(bitmap);
+            Wire.MarkCompressed(marked.Id, 70, 100);
+            program.History.Apply(marked, false);
+            for (int i = 0; i < 53; i++)
+                program.History.Apply(WindowsClipboard.ToFrame("分页检查 " + i), true);
+            var query = Descendants<TextBox>(window).Single(box =>
+                System.Windows.Automation.AutomationProperties.GetName(box) == "搜索历史");
+            query.Text = "分页检查";
+            window.UpdateLayout();
+            var nextPage = Descendants<Button>(window).Single(button => Equals(button.Content, "下一页"));
+            var previousPage = Descendants<Button>(window).Single(button => Equals(button.Content, "上一页"));
+            if (list.Items.Count != 50 || !nextPage.IsEnabled || previousPage.IsEnabled)
+                throw new Exception("History did not start with 50 records");
+            nextPage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (list.Items.Count != 3 || nextPage.IsEnabled || !previousPage.IsEnabled)
+                throw new Exception("Next page did not contain the remainder");
+            query.Text = "图片";
+            window.UpdateLayout();
+            if (previousPage.IsEnabled || !Descendants<TextBlock>(list).Any(label => label.Text == "已压缩：原 70%"))
+                throw new Exception("Image filter did not reset page or display the compression percentage");
+            query.Text = "分页检查";
+            var changeSize = Descendants<Button>(window).Single(button => Equals(button.Content, "每页 50 条"));
+            for (int i = 0; i < 3; i++) changeSize.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (list.Items.Count != 25 || File.ReadAllText(Path.Combine(path, "history-page-size.txt")) != "25")
+                throw new Exception("Page size is not applied and persisted");
+            Console.WriteLine("PASS: default 50, next page, filter reset, saved page size and compression percentage");
             app.Shutdown();
         }
     }

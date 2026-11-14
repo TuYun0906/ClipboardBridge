@@ -407,6 +407,22 @@ public final class MainActivity extends Activity {
         LinearLayout rows = Style.column(this);
         scroll.addView(rows);
         add(body, scroll, 10, Math.min(dp(410), getResources().getDisplayMetrics().heightPixels / 2));
+        int[] counts = {10, 25, 50, 100};
+        int savedCount = prefs.getInt(Prefs.HISTORY_PAGE_SIZE, 50);
+        int[] pageSize = {savedCount >= 1 && savedCount <= 100 ? savedCount : 50};
+        int[] page = {0};
+        LinearLayout pagination = new LinearLayout(this);
+        TextView size = Style.action(this, "", false, () -> { });
+        TextView previous = Style.action(this, "上一页", false, () -> { });
+        TextView next = Style.action(this, "下一页", false, () -> { });
+        TextView pageLabel = Style.label(this, "", 12, Style.MUTED, false);
+        pageLabel.setGravity(Gravity.CENTER);
+        equal(pagination, size);
+        pagination.addView(pageLabel, new LinearLayout.LayoutParams(dp(42), -1));
+        equal(pagination, previous);
+        equal(pagination, next);
+        for (TextView button : new TextView[]{size, previous, next}) button.setPadding(0, 0, 0, 0);
+        add(body, pagination, 7, dp(40));
         TextView feedback = Style.label(this, "", 13, Style.MUTED, false);
         feedback.setGravity(Gravity.CENTER);
         feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -442,6 +458,7 @@ public final class MainActivity extends Activity {
             rows.removeAllViews();
             previews.clear();
             cards.clear();
+            java.util.List<ClipHistory.Entry> matches = new java.util.ArrayList<>();
             for (ClipHistory.Entry entry : entries) {
                 if (filter[0] != 0 && entry.kind != filter[0]) continue;
                 if (!entry.text.toLowerCase(java.util.Locale.ROOT).contains(term)) continue;
@@ -449,6 +466,18 @@ public final class MainActivity extends Activity {
                 LocalDate date = copied == null ? null : copied.toLocalDate();
                 if ((bounds[0] != null && (date == null || date.isBefore(bounds[0]))) ||
                         (bounds[1] != null && (date == null || date.isAfter(bounds[1])))) continue;
+                matches.add(entry);
+            }
+            int pageCount = Math.max(1, (matches.size() + pageSize[0] - 1) / pageSize[0]);
+            page[0] = Math.max(0, Math.min(page[0], pageCount - 1));
+            size.setText("每页 " + pageSize[0] + " 条");
+            pageLabel.setText((page[0] + 1) + "/" + pageCount);
+            previous.setEnabled(page[0] > 0);
+            next.setEnabled(page[0] + 1 < pageCount);
+            previous.setAlpha(previous.isEnabled() ? 1f : 0.42f);
+            next.setAlpha(next.isEnabled() ? 1f : 0.42f);
+            int start = page[0] * pageSize[0];
+            for (ClipHistory.Entry entry : matches.subList(start, Math.min(start + pageSize[0], matches.size()))) {
                 LinearLayout card = Style.column(this);
                 cards.put(entry.key, card);
                 card.setFocusable(true);
@@ -459,7 +488,7 @@ public final class MainActivity extends Activity {
                         android.content.res.ColorStateList.valueOf(0x283368ea), surface, null));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
                 if (entry.kind == Wire.IMAGE) {
-                    card.setContentDescription(entry.compressed ? "已压缩的图片记录" : "图片记录");
+                    card.setContentDescription(entry.compressionPercent >= 0 ? "已压缩的图片记录" : "图片记录");
                     previews.put(entry.key, addHistoryImage(card, service, entry));
                 }
                 else {
@@ -469,9 +498,14 @@ public final class MainActivity extends Activity {
                     add(card, label, 0, -2);
                     previews.put(entry.key, () -> previewHistoryText(service, entry));
                 }
+                ZonedDateTime copied = entry.copiedAt == 0 ? null : Instant.ofEpochMilli(entry.copiedAt).atZone(zone);
                 String timeLabel = copied == null ? "复制时间未知" : timestamp.format(copied);
-                add(card, Style.label(this, entry.compressed ? "已压缩 · " + timeLabel : timeLabel,
-                        12, entry.compressed ? Style.BLUE : Style.MUTED, false), 5, -2);
+                if (entry.compressionPercent >= 0) {
+                    String compression = entry.compressionPercent == 0 ? "已压缩" :
+                            "已压缩：原 " + entry.compressionPercent + "%";
+                    add(card, Style.label(this, compression, 12, Style.BLUE, false), 5, -2);
+                }
+                add(card, Style.label(this, timeLabel, 12, Style.MUTED, false), 5, -2);
                 card.setOnClickListener(view -> {
                     if (!selected.isEmpty()) {
                         if (!selected.remove(entry.key)) selected.add(entry.key);
@@ -503,10 +537,23 @@ public final class MainActivity extends Activity {
             }
             updateSelection.run();
         };
-        Runnable resetSelection = () -> {
+        Runnable changePage = () -> {
             selected.clear();
             refresh.run();
+            scroll.scrollTo(0, 0);
         };
+        Runnable resetSelection = () -> {
+            page[0] = 0;
+            changePage.run();
+        };
+        previous.setOnClickListener(view -> { page[0]--; changePage.run(); });
+        next.setOnClickListener(view -> { page[0]++; changePage.run(); });
+        size.setOnClickListener(view -> {
+            int index = java.util.Arrays.binarySearch(counts, pageSize[0]);
+            pageSize[0] = counts[index < 0 ? 0 : (index + 1) % counts.length];
+            prefs.edit().putInt(Prefs.HISTORY_PAGE_SIZE, pageSize[0]).apply();
+            resetSelection.run();
+        });
         TextView type = Style.action(this, "全部", false, () -> { });
         type.setContentDescription("历史类型：全部");
         LinearLayout.LayoutParams typeSize = new LinearLayout.LayoutParams(dp(72), -1);

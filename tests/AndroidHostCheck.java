@@ -38,7 +38,7 @@ public final class AndroidHostCheck {
                 for (int i = 11; i <= 13; i++) {
                     Wire.Frame image = received.poll(8, TimeUnit.SECONDS);
                     check(image, Wire.IMAGE, "image " + i);
-                    if (Wire.isCompressed(image.id) != (i == 12)) throw new AssertionError("Compression provenance");
+                    if (Wire.compressionPercent(image.id) != (i == 12 ? 70 : -1)) throw new AssertionError("Compression provenance");
                     Wire.Frame forwarded = peer.read();
                     check(forwarded, Wire.IMAGE, "image " + i);
                     peer.send(new Wire.Frame(Wire.ACK, forwarded.id, new byte[0]));
@@ -46,7 +46,7 @@ public final class AndroidHostCheck {
                 java.util.concurrent.CountDownLatch delivered = new java.util.concurrent.CountDownLatch(1);
                 for (int i = 21; i <= 23; i++) {
                     Wire.Frame image = frame(Wire.IMAGE, i, "host image " + i);
-                    if (i == 22) Wire.markCompressed(image.id);
+                    if (i == 22) Wire.markCompressed(image.id, 70, 100);
                     host.submit(image, i == 23 ? delivered::countDown : null);
                 }
                 for (int i = 21; i <= 23; i++) {

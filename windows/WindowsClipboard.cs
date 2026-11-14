@@ -174,7 +174,7 @@ internal sealed class WindowsClipboard : IDisposable
         if (bitmap == null) throw new IOException("无法读取图片");
         ValidateDimensions(bitmap);
         byte[] result;
-        bool compressed = false;
+        int originalBytes = 0;
         if (!compress) result = Encode(bitmap, new PngBitmapEncoder());
         else if (image != null && IsGif(image)) result = image;
         else
@@ -195,12 +195,12 @@ internal sealed class WindowsClipboard : IDisposable
                 : new JpegBitmapEncoder { QualityLevel = 82 });
             byte[] baseline = image != null && IsStandardImage(image) ? image :
                 Encode(bitmap, new PngBitmapEncoder());
-            compressed = result.Length < baseline.Length;
-            if (!compressed) result = baseline;
+            if (result.Length < baseline.Length) originalBytes = baseline.Length;
+            else result = baseline;
         }
         if (result.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");
         byte[] id = NewId();
-        if (compressed) Wire.MarkCompressed(id);
+        if (originalBytes > 0) Wire.MarkCompressed(id, result.Length, originalBytes);
         return new Frame(Wire.Image, id, result);
     }
 

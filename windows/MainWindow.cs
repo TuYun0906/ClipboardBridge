@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -82,6 +83,7 @@ internal sealed class MainWindow : Window
         history.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         history.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         history.RowDefinitions.Add(new RowDefinition());
+        history.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var historyCard = new Border { CornerRadius = new CornerRadius(20),
             Padding = new Thickness(14), Background = Brushes.White, Child = history };
         Grid.SetRow(historyCard, 2);
@@ -131,15 +133,56 @@ internal sealed class MainWindow : Window
         ScrollViewer.SetCanContentScroll(items, false);
         Grid.SetRow(items, 2);
         history.Children.Add(items);
-        Action refresh = () =>
+        int page = 0;
+        int[] sizes = { 10, 25, 50, 100 };
+        Action refresh = null;
+        var pagination = new DockPanel { Margin = new Thickness(0, 6, 0, 0) };
+        var sizeButton = Action("", false, () =>
+        {
+            int index = Array.IndexOf(sizes, program.HistoryPageSize);
+            program.SetHistoryPageSize(sizes[(index + 1) % sizes.Length]);
+            page = 0;
+            refresh();
+        });
+        sizeButton.Height = 29;
+        sizeButton.Width = 85;
+        sizeButton.ToolTip = "点击切换每页条数：10、25、50、100";
+        pagination.Children.Add(sizeButton);
+        var next = Action("下一页", false, () => { page++; refresh(); });
+        next.Width = 62;
+        DockPanel.SetDock(next, Dock.Right);
+        pagination.Children.Add(next);
+        var previous = Action("上一页", false, () => { page--; refresh(); });
+        previous.Width = 62;
+        previous.Margin = new Thickness(0, 0, 6, 0);
+        DockPanel.SetDock(previous, Dock.Right);
+        pagination.Children.Add(previous);
+        var pageLabel = Label("", 12, Muted, false);
+        pageLabel.VerticalAlignment = VerticalAlignment.Center;
+        pageLabel.HorizontalAlignment = HorizontalAlignment.Center;
+        pagination.Children.Add(pageLabel);
+        Grid.SetRow(pagination, 3);
+        history.Children.Add(pagination);
+        refresh = () =>
         {
             items.Items.Clear();
+            int pageSize = program.HistoryPageSize;
+            sizeButton.Content = "每页 " + pageSize + " 条";
+            var matches = from.SelectedDate > through.SelectedDate ? new ClipHistory.Entry[0] :
+                program.History.Search(search.Text, from.SelectedDate, through.SelectedDate, kind);
+            int pageCount = Math.Max(1, (matches.Length + pageSize - 1) / pageSize);
+            page = Math.Max(0, Math.Min(page, pageCount - 1));
+            pageLabel.Text = (page + 1) + " / " + pageCount;
+            previous.IsEnabled = page > 0;
+            next.IsEnabled = page + 1 < pageCount;
+            var scroll = items.Template == null ? null : items.Template.FindName("PART_ScrollViewer", items) as ScrollViewer;
+            if (scroll != null) scroll.ScrollToTop();
             if (from.SelectedDate > through.SelectedDate)
             {
                 items.Items.Add(Label("结束日期须在开始日期当天或之后", 14, Muted, false));
                 return;
             }
-            foreach (var entry in program.History.Search(search.Text, from.SelectedDate, through.SelectedDate, kind))
+            foreach (var entry in matches.Skip(page * pageSize).Take(pageSize))
             {
                 var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 48 };
                 var copy = Action("复制", false, () => program.CopyHistory(entry.Path));
@@ -155,7 +198,7 @@ internal sealed class MainWindow : Window
                     VerticalAlignment = VerticalAlignment.Center };
                 if (entry.Kind == Wire.Image)
                 {
-                    row.Height = 82;
+                    row.Height = entry.CompressionPercent >= 0 ? 99 : 82;
                     copy.Height = delete.Height = 36;
                     AddHistoryImage(details, entry.Path);
                 }
@@ -163,9 +206,14 @@ internal sealed class MainWindow : Window
                 string timestamp = entry.CopyTime.HasValue
                     ? entry.CopyTime.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
                     : "复制时间未知";
-                var time = Label(entry.Compressed ? "已压缩 · " + timestamp : timestamp, 12,
-                    entry.Compressed ? Blue : Muted, false);
-                if (entry.Compressed) time.ToolTip = "已压缩 · " + timestamp;
+                if (entry.CompressionPercent >= 0)
+                {
+                    string compression = entry.CompressionPercent == 0 ? "已压缩" : "已压缩：原 " + entry.CompressionPercent + "%";
+                    var badge = Label(compression, 12, Blue, false);
+                    badge.Margin = new Thickness(0, 3, 0, 0);
+                    details.Children.Add(badge);
+                }
+                var time = Label(timestamp, 12, Muted, false);
                 time.Margin = new Thickness(0, 3, 0, 0);
                 details.Children.Add(time);
                 row.Children.Add(details);
@@ -182,15 +230,16 @@ internal sealed class MainWindow : Window
             }
             if (items.Items.Count == 0) items.Items.Add(Label("暂无匹配记录", 14, Muted, false));
         };
-        search.TextChanged += (sender, args) => refresh();
+        Action resetPage = () => { page = 0; refresh(); };
+        search.TextChanged += (sender, args) => resetPage();
         type.Click += (sender, args) =>
         {
             kind = !kind.HasValue ? Wire.Text : kind.Value == Wire.Text ? Wire.Image : (byte?)null;
             type.Content = kind == Wire.Text ? "文字" : kind == Wire.Image ? "图片" : "全部";
-            refresh();
+            resetPage();
         };
-        from.SelectedDateChanged += (sender, args) => refresh();
-        through.SelectedDateChanged += (sender, args) => refresh();
+        from.SelectedDateChanged += (sender, args) => resetPage();
+        through.SelectedDateChanged += (sender, args) => resetPage();
         program.HistoryChanged += refresh;
         IsVisibleChanged += (sender, args) => { if (IsVisible) refresh(); };
         refresh();
@@ -649,6 +698,9 @@ internal sealed class MainWindow : Window
         var pressed = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
         pressed.Setters.Add(new Setter(OpacityProperty, 0.68, "Surface"));
         template.Triggers.Add(pressed);
+        var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(OpacityProperty, 0.42, "Surface"));
+        template.Triggers.Add(disabled);
         var button = new Button
         {
             Content = text, Background = primary ? Blue : Tint,

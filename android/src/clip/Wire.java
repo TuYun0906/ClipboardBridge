@@ -12,8 +12,23 @@ final class Wire {
     // Preserve provenance without changing the frame layout understood by older peers.
     private static final byte[] COMPRESSED_MARK = {(byte)0xC1, 0x19, 0x3B, (byte)0xA6, 0x5D};
     static void markCompressed(byte[] id) { System.arraycopy(COMPRESSED_MARK, 0, id, 6, COMPRESSED_MARK.length); }
-    static boolean isCompressed(byte[] id) {
-        for (int i = 0; i < COMPRESSED_MARK.length; i++) if (id[6 + i] != COMPRESSED_MARK[i]) return false;
+    private static final byte[] RATIO_MARK = {(byte)0xC1, 0x19, 0x3B, (byte)0xA7, 0x5E};
+
+    static void markCompressed(byte[] id, int remainingBytes, int originalBytes) {
+        System.arraycopy(RATIO_MARK, 0, id, 6, RATIO_MARK.length);
+        id[11] = (byte)Math.max(1, Math.min(99, (100L * remainingBytes + originalBytes / 2) / originalBytes));
+    }
+
+    // -1 means original, 0 means compressed by an older version with no known ratio.
+    static int compressionPercent(byte[] id) {
+        if (hasMark(id, RATIO_MARK) && id[11] >= 1 && id[11] <= 99) return id[11];
+        return hasMark(id, COMPRESSED_MARK) ? 0 : -1;
+    }
+
+    static boolean isCompressed(byte[] id) { return compressionPercent(id) >= 0; }
+
+    private static boolean hasMark(byte[] id, byte[] mark) {
+        for (int i = 0; i < mark.length; i++) if (id[6 + i] != mark[i]) return false;
         return true;
     }
 

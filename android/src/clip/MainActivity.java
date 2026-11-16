@@ -226,6 +226,12 @@ public final class MainActivity extends Activity {
         mediaHint = Style.label(this, "✓ 已开启截图与拍照同步", 13, Style.BLUE, true);
         mediaHint.setVisibility(View.GONE);
         options.addView(mediaHint);
+        TextView github = Style.label(this, "github页", 14, Style.BLUE, false);
+        github.setGravity(Gravity.CENTER);
+        github.setPaintFlags(github.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+        github.setFocusable(true);
+        github.setOnClickListener(view -> openLink("https://github.com/TuYun0906/ClipboardBridge"));
+        add(root, github, 8, dp(44));
         setContentView(scroll);
         if (Build.VERSION.SDK_INT >= 30) scroll.post(() -> {
             WindowInsetsController controller = scroll.getWindowInsetsController();
@@ -379,12 +385,14 @@ public final class MainActivity extends Activity {
     }
 
     private void helpLink(LinearLayout body, String title, String url) {
-        add(body, Style.action(this, title, false, () -> {
-            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
-            catch (android.content.ActivityNotFoundException error) {
-                Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show();
-            }
-        }), 8, dp(44));
+        add(body, Style.action(this, title, false, () -> openLink(url)), 8, dp(44));
+    }
+
+    private void openLink(String url) {
+        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+        catch (android.content.ActivityNotFoundException error) {
+            Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void showHistory() {
@@ -502,7 +510,7 @@ public final class MainActivity extends Activity {
                 String timeLabel = copied == null ? "复制时间未知" : timestamp.format(copied);
                 if (entry.compressionPercent >= 0) {
                     String compression = entry.compressionPercent == 0 ? "已压缩" :
-                            "已压缩：原 " + entry.compressionPercent + "%";
+                            "已压缩至原" + entry.compressionPercent + "%";
                     add(card, Style.label(this, compression, 12, Style.BLUE, false), 5, -2);
                 }
                 add(card, Style.label(this, timeLabel, 12, Style.MUTED, false), 5, -2);

@@ -63,7 +63,10 @@ public final class SyncService extends Service {
     static void start(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
     String status() {
         if (lastImageSentAt == 0) return status;
-        String time = android.text.format.DateFormat.getTimeFormat(this).format(new java.util.Date(lastImageSentAt));
+        java.util.Locale locale = getResources().getConfiguration().getLocales().get(0);
+        String skeleton = android.text.format.DateFormat.is24HourFormat(this) ? "Hms" : "hms";
+        String pattern = android.text.format.DateFormat.getBestDateTimePattern(locale, skeleton);
+        String time = new java.text.SimpleDateFormat(pattern, locale).format(new java.util.Date(lastImageSentAt));
         return status + " · " + IMAGE_SENT + " " + time;
     }
     String hostPairingCode() { return host == null || hostIdentity == null ? "" : hostIdentity.code; }

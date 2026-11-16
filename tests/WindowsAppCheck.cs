@@ -213,7 +213,7 @@ internal static class WindowsAppCheck
                 throw new Exception("Next page did not contain the remainder");
             query.Text = "图片";
             window.UpdateLayout();
-            if (previousPage.IsEnabled || !Descendants<TextBlock>(list).Any(label => label.Text == "已压缩：原 70%"))
+            if (previousPage.IsEnabled || !Descendants<TextBlock>(list).Any(label => label.Text == "已压缩至原70%"))
                 throw new Exception("Image filter did not reset page or display the compression percentage");
             query.Text = "分页检查";
             var changeSize = Descendants<Button>(window).Single(button => Equals(button.Content, "每页 50 条"));

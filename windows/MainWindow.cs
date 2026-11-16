@@ -208,7 +208,7 @@ internal sealed class MainWindow : Window
                     : "复制时间未知";
                 if (entry.CompressionPercent >= 0)
                 {
-                    string compression = entry.CompressionPercent == 0 ? "已压缩" : "已压缩：原 " + entry.CompressionPercent + "%";
+                    string compression = entry.CompressionPercent == 0 ? "已压缩" : "已压缩至原" + entry.CompressionPercent + "%";
                     var badge = Label(compression, 12, Blue, false);
                     badge.Margin = new Thickness(0, 3, 0, 0);
                     details.Children.Add(badge);
@@ -346,14 +346,16 @@ internal sealed class MainWindow : Window
 
     private static void AddHelpLink(StackPanel body, string title, string url)
     {
-        var link = Action(title, false, () =>
-        {
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
-            catch (System.ComponentModel.Win32Exception) { MessageBox.Show("无法打开浏览器。", "如何上手"); }
-        });
+        var link = Action(title, false, () => OpenLink(url));
         link.Height = 36;
         link.Margin = new Thickness(0, 8, 0, 0);
         body.Children.Add(link);
+    }
+
+    private static void OpenLink(string url)
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (System.ComponentModel.Win32Exception) { MessageBox.Show("无法打开浏览器。", "跨设备剪贴板"); }
     }
 
     private void AddHistoryImage(Panel row, string path)
@@ -602,6 +604,20 @@ internal sealed class MainWindow : Window
         save.Height = 43;
         save.Margin = new Thickness(0, 11, 0, 0);
         body.Children.Add(save);
+        const string githubUrl = "https://github.com/TuYun0906/ClipboardBridge";
+        var footer = new TextBlock { Margin = new Thickness(0, 12, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Center, FontSize = 13 };
+        var github = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run("github页"))
+        {
+            Foreground = Blue, NavigateUri = new Uri(githubUrl), ToolTip = githubUrl
+        };
+        github.RequestNavigate += (sender, args) =>
+        {
+            OpenLink(args.Uri.AbsoluteUri);
+            args.Handled = true;
+        };
+        footer.Inlines.Add(github);
+        body.Children.Add(footer);
         dialog.Content = body;
         dialog.ShowDialog();
     }

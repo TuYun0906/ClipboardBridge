@@ -6,6 +6,7 @@ import android.os.Build;
 import android.content.pm.PackageManager;
 
 final class Prefs {
+    static final String SCREENSHOT_BUBBLE = "screenshot_bubble";
     static final int PORT = 47832;
     static final String HISTORY_PAGE_SIZE = "history_page_size";
     static final String COMPRESS = "compress_images";

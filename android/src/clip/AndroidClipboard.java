@@ -62,6 +62,14 @@ final class AndroidClipboard {
     Wire.Frame makeFrame(Object snapshot) throws IOException { return makeFrame(snapshot, false); }
 
     Wire.Frame makeFrame(Object snapshot, boolean compress) throws IOException {
+        if (snapshot instanceof Bitmap) {
+            ByteArrayOutputStream png = new ByteArrayOutputStream();
+            if (!((Bitmap)snapshot).compress(Bitmap.CompressFormat.PNG, 100, png))
+                throw new IOException("Could not encode screenshot");
+            byte[] imageId = id();
+            return new Wire.Frame(Wire.IMAGE, imageId,
+                    imageBytes(new java.io.ByteArrayInputStream(png.toByteArray()), compress, imageId));
+        }
         if (snapshot instanceof Uri) {
             byte[] imageId = id();
             return new Wire.Frame(Wire.IMAGE, imageId, imageBytes((Uri) snapshot, compress, imageId));

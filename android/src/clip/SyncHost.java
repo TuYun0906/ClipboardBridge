@@ -76,6 +76,17 @@ final class SyncHost implements Closeable {
         }
     }
 
+    synchronized void cancelImage(Wire.Frame frame) {
+        waitingImages.removeIf(image -> image.frame == frame);
+        for (Peer peer : peers) {
+            peer.images.removeIf(image -> image.frame == frame);
+            if (peer.sentImage != null && peer.sentImage.frame == frame) {
+                peer.sentImage = null;
+                schedule(peer);
+            }
+        }
+    }
+
     private synchronized void publish(Wire.Frame frame, Peer origin) {
         if (closed) return;
         for (Peer peer : peers) {

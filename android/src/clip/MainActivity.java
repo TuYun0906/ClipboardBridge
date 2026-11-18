@@ -32,14 +32,14 @@ import java.time.format.DateTimeFormatter;
 import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
-    private static final int IMAGE = 31, MEDIA = 32, NOTICE = 33;
+    private static final int IMAGE = 31, MEDIA = 32, NOTICE = 33, CAPTURE = 35, CAPTURE_OVERLAY = 36;
     private SharedPreferences prefs;
     private ClipboardManager clipboard;
     private TextView status, mediaHint, authorize, bannerPermission;
     private EditText host, pair;
     private TextView hostAddress, hostCode;
-    private Switch media, internet, auto;
-    private boolean updating, configuredMode;
+    private Switch media, internet, auto, screenshotBubble;
+    private boolean updating, configuredMode, capturePermissionPending;
     private final ClipboardManager.OnPrimaryClipChangedListener clipChanges = this::captureFocused;
     private final BroadcastReceiver statusChanges = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -55,10 +55,16 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedState) {
         super.onCreate(savedState);
         prefs = Prefs.get(this);
+        capturePermissionPending = savedState != null && savedState.getBoolean("capturePermissionPending");
         clipboard = getSystemService(ClipboardManager.class);
         configuredMode = prefs.getBoolean(Prefs.INTERNET, false);
         buildScreen();
         if (savedState == null) findViewById(android.R.id.content).post(() -> openAction(getIntent()));
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean("capturePermissionPending", capturePermissionPending);
+        super.onSaveInstanceState(state);
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -84,6 +90,7 @@ public final class MainActivity extends Activity {
         media.setChecked(prefs.getBoolean(Prefs.MEDIA, false) && Prefs.canReadMedia(this));
         updating = false;
         refreshBannerPermission();
+        refreshScreenshotSwitch();
     }
 
     @Override protected void onStop() {
@@ -208,6 +215,20 @@ public final class MainActivity extends Activity {
             if (enabled) captureFocused();
             refreshStatus();
         });
+        screenshotBubble = toggle(options, "截屏发送悬浮窗",
+                prefs.getBoolean(Prefs.SCREENSHOT_BUBBLE, false) && android.provider.Settings.canDrawOverlays(this));
+        screenshotBubble.setOnCheckedChangeListener((button, enabled) -> {
+            if (updating) return;
+            if (enabled && !android.provider.Settings.canDrawOverlays(this)) {
+                Intent settings = new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName()));
+                try { startActivityForResult(settings, CAPTURE_OVERLAY); }
+                catch (android.content.ActivityNotFoundException unavailable) {
+                    refreshScreenshotSwitch();
+                    Toast.makeText(this, "请在系统设置中允许显示悬浮窗", Toast.LENGTH_SHORT).show();
+                }
+            } else prefs.edit().putBoolean(Prefs.SCREENSHOT_BUBBLE, enabled).apply();
+        });
         media = toggle(options, "自动发送截图与拍照", false);
         media.setOnCheckedChangeListener((button, enabled) -> {
             if (updating) return;
@@ -308,11 +329,28 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void refreshScreenshotSwitch() {
+        updating = true;
+        screenshotBubble.setChecked(prefs.getBoolean(Prefs.SCREENSHOT_BUBBLE, false) &&
+                android.provider.Settings.canDrawOverlays(this));
+        updating = false;
+    }
+
     private void openAction(Intent intent) {
         String mode = intent.getStringExtra("mode");
         if ("text".equals(mode)) sendText();
         if ("image".equals(mode)) selectImage();
         intent.removeExtra("mode");
+        if ("capture-permission".equals(mode) && !capturePermissionPending && prefs.getBoolean(Prefs.SCREENSHOT_BUBBLE, false) &&
+                android.provider.Settings.canDrawOverlays(this)) {
+            android.media.projection.MediaProjectionManager manager =
+                    getSystemService(android.media.projection.MediaProjectionManager.class);
+            Intent consent = Build.VERSION.SDK_INT >= 34
+                    ? manager.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+                    : manager.createScreenCaptureIntent();
+            capturePermissionPending = true;
+            startActivityForResult(consent, CAPTURE);
+        }
     }
 
     private void sendText() {
@@ -339,6 +377,19 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
+        if (code == CAPTURE_OVERLAY) {
+            prefs.edit().putBoolean(Prefs.SCREENSHOT_BUBBLE, android.provider.Settings.canDrawOverlays(this)).apply();
+            refreshScreenshotSwitch();
+            return;
+        }
+        if (code == CAPTURE) {
+            capturePermissionPending = false;
+            if (result == RESULT_OK && data != null && prefs.getBoolean(Prefs.SCREENSHOT_BUBBLE, false)) {
+                SyncService.authorizeCapture(this, result, data);
+                moveTaskToBack(true);
+            }
+            return;
+        }
         if (code != IMAGE || result != RESULT_OK || data == null) return;
         android.content.ClipData selection = data.getClipData();
         if (selection == null) {

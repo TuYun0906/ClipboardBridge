@@ -8,6 +8,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ServiceInfo;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -21,6 +23,7 @@ import java.util.Base64;
 public final class SyncService extends Service {
     static final String HISTORY = "clip.bridge.HISTORY";
     static final String STATUS = "clip.bridge.SYNC_STATUS";
+    private static final String CAPTURE_PERMISSION = "clip.bridge.CAPTURE_PERMISSION";
     private static final String CHANNEL = "clipboard_link";
     private static final String IMAGE_NOTICE_CHANNEL = "clipboard_image_sent";
     private static final int NOTICE = 11, IMAGE_NOTICE = 12;
@@ -58,9 +61,28 @@ public final class SyncService extends Service {
     private static final String IMAGE_SENT = "发送图片成功";
     private String status = "等待连接";
     private long lastImageSentAt;
+    private ScreenshotBubble screenshot;
+    private Object queuedCapture;
+    private Runnable cancelCapture;
+    private android.widget.Toast imageToast;
     private final ImageSentBanner imageBanner = new ImageSentBanner(this);
 
     static void start(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
+    static void authorizeCapture(Context context, int result, Intent data) {
+        context.startForegroundService(new Intent(context, SyncService.class).setAction(CAPTURE_PERMISSION)
+                .putExtra("result", result).putExtra("consent", data));
+    }
+
+    void setCaptureForeground(boolean capture) {
+        int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+        if (capture) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+        startForeground(NOTICE, notification(), types);
+    }
+
+    void endCaptureForeground() {
+        if (!destroyed) setCaptureForeground(false);
+    }
+
     String status() {
         if (lastImageSentAt == 0) return status;
         java.util.Locale locale = getResources().getConfiguration().getLocales().get(0);
@@ -92,6 +114,7 @@ public final class SyncService extends Service {
         super.onCreate();
         running = this;
         prefs = Prefs.get(this);
+        screenshot = new ScreenshotBubble(this, main);
         clipboard = new AndroidClipboard(this);
         history = new ClipHistory(this);
         io = new HandlerThread("clipboard-media");
@@ -112,7 +135,7 @@ public final class SyncService extends Service {
             sent.setShowBadge(false);
             notifications.createNotificationChannel(sent);
         }
-        startForeground(NOTICE, notification());
+        setCaptureForeground(false);
         getSystemService(android.net.ConnectivityManager.class).registerNetworkCallback(
                 new android.net.NetworkRequest.Builder()
                         .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
@@ -121,6 +144,10 @@ public final class SyncService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         applySettings();
+        if (intent != null && CAPTURE_PERMISSION.equals(intent.getAction())) {
+            Intent consent = intent.getParcelableExtra("consent");
+            if (consent != null) screenshot.authorize(intent.getIntExtra("result", 0), consent);
+        }
         return START_STICKY;
     }
 
@@ -131,7 +158,8 @@ public final class SyncService extends Service {
         getSystemService(android.net.ConnectivityManager.class).unregisterNetworkCallback(networkChanges);
         prefs.unregisterOnSharedPreferenceChangeListener(changes);
         main.removeCallbacksAndMessages(null);
-        imageBanner.dismiss();
+        dismissImagePopup();
+        screenshot.close();
         if (client != null) client.close();
         if (host != null) host.close();
         background.close();
@@ -277,7 +305,57 @@ public final class SyncService extends Service {
         }
     }
 
+    boolean capturePeerConnected() {
+        return "已连接".equals(status) || "主机已连接".equals(status);
+    }
+
+    void sendCapture(Bitmap image, Object request) {
+        if (!worker.post(() -> {
+            try {
+                Wire.Frame frame = clipboard.makeFrame(image, prefs.getBoolean(Prefs.COMPRESS, false));
+                main.post(() -> {
+                    if (destroyed || !screenshot.isSending(request)) return;
+                    if (!capturePeerConnected()) {
+                        screenshot.sendFailed(request);
+                        return;
+                    }
+                    Runnable delivered = () -> main.post(() -> {
+                        if (destroyed || !screenshot.isSending(request)) return;
+                        worker.post(() -> record(frame, true));
+                        showImageSent(request);
+                    });
+                    SyncHost currentHost = host;
+                    SyncClient currentClient = client;
+                    if (currentHost != null) {
+                        queuedCapture = request;
+                        cancelCapture = () -> currentHost.cancelImage(frame);
+                        currentHost.submit(frame, delivered);
+                    } else if (currentClient != null) {
+                        queuedCapture = request;
+                        cancelCapture = () -> currentClient.cancelImage(frame);
+                        currentClient.submit(frame, delivered);
+                    } else screenshot.sendFailed(request);
+                });
+            } catch (IOException | RuntimeException error) {
+                android.util.Log.w("ClipCapture", "Could not encode captured image", error);
+                main.post(() -> screenshot.sendFailed(request));
+            } finally { image.recycle(); }
+        })) {
+            image.recycle();
+            screenshot.sendFailed(request);
+        }
+    }
+
+    void finishCapture(Object request, boolean delivered) {
+        if (queuedCapture != request) return;
+        if (!delivered) cancelCapture.run();
+        queuedCapture = null;
+        cancelCapture = null;
+    }
+
     private void applySettings() {
+        screenshot.enable(prefs.getBoolean(Prefs.SCREENSHOT_BUBBLE, false));
+        if (screenshot.isVisible()) dismissImagePopup();
         boolean hostMode = prefs.getBoolean(Prefs.HOST, false);
         if (hostMode != hosting) {
             hosting = hostMode;
@@ -410,8 +488,15 @@ public final class SyncService extends Service {
                 "huawei".equalsIgnoreCase(Build.BRAND);
     }
 
-    private void showImageSent() {
+    private void showImageSent() { showImageSent(null); }
+
+    private void showImageSent(Object request) {
         if (destroyed) return;
+        if (screenshot.isVisible()) {
+            screenshot.delivered(request);
+            return;
+        }
+        if (request != null) return;
         lastImageSentAt = System.currentTimeMillis();
         sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
         NotificationManager notifications = getSystemService(NotificationManager.class);
@@ -436,7 +521,18 @@ public final class SyncService extends Service {
                 // Permission may have changed since the check above.
             }
         }
-        android.widget.Toast.makeText(this, IMAGE_SENT, android.widget.Toast.LENGTH_SHORT).show();
+        if (imageToast != null) imageToast.cancel();
+        imageToast = android.widget.Toast.makeText(this, IMAGE_SENT, android.widget.Toast.LENGTH_SHORT);
+        imageToast.show();
+    }
+
+    private void dismissImagePopup() {
+        imageBanner.dismiss();
+        getSystemService(NotificationManager.class).cancel(IMAGE_NOTICE);
+        if (imageToast != null) {
+            imageToast.cancel();
+            imageToast = null;
+        }
     }
 
     private Notification notification() {

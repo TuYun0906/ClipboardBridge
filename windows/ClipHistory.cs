@@ -6,6 +6,8 @@ using System.Text;
 
 internal sealed class ClipHistory
 {
+    private const int ImageHistoryLimit = 50;
+
     internal sealed class Entry
     {
         internal string Path, Label, Text, Key;
@@ -40,7 +42,7 @@ internal sealed class ClipHistory
         }
         foreach (var group in entries.Values.GroupBy(e => new { e.Kind, e.ContentKey }).ToArray())
             foreach (var old in group.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).Skip(1)) Delete(old.Key);
-        Trim();
+        TrimImages();
     }
 
     internal static string Key(byte[] id) { return BitConverter.ToString(id).Replace("-", "").ToLowerInvariant(); }
@@ -59,11 +61,6 @@ internal sealed class ClipHistory
     }
 
     internal Frame[] Apply(Frame frame, bool local)
-    {
-        return Apply(frame, local, true);
-    }
-
-    private Frame[] Apply(Frame frame, bool local, bool trimAfter)
     {
         lock (entries)
         {
@@ -93,7 +90,7 @@ internal sealed class ClipHistory
             entries.Add(key, entry);
             changes.Add(new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data));
             if (duplicate != null && Delete(duplicate.Key)) changes.Add(Tombstone(duplicate.Key));
-            if (trimAfter) changes.AddRange(Trim());
+            if (entry.Kind == Wire.Image) changes.AddRange(TrimImages());
             return changes.ToArray();
         }
     }
@@ -111,9 +108,8 @@ internal sealed class ClipHistory
             string editedKey = Key(id);
             if (entries.ContainsKey(editedKey) || deleted.Contains(editedKey)) throw new IOException("无法生成编辑记录");
             var edited = new Frame(Wire.Text, id, replacement.Data);
-            var changes = new List<Frame>(Apply(edited, true, false));
+            var changes = new List<Frame>(Apply(edited, true));
             if (Delete(key)) changes.Insert(0, removal);
-            changes.AddRange(Trim());
             return changes.ToArray();
         }
     }
@@ -182,17 +178,13 @@ internal sealed class ClipHistory
         };
     }
 
-    private IEnumerable<Frame> Trim()
+    private IEnumerable<Frame> TrimImages()
     {
-        long bytes = 0;
-        int count = 0;
         var changes = new List<Frame>();
-        foreach (Entry entry in entries.Values.OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).ToArray())
-        {
-            bytes += new FileInfo(entry.Path).Length;
-            if (++count <= 100 && bytes <= 64L * 1024 * 1024) continue;
+        var overflow = entries.Values.Where(e => e.Kind == Wire.Image)
+            .OrderByDescending(e => Order(e.Key), StringComparer.Ordinal).Skip(ImageHistoryLimit).ToArray();
+        foreach (Entry entry in overflow)
             if (Delete(entry.Key)) changes.Add(Tombstone(entry.Key));
-        }
         return changes;
     }
 }

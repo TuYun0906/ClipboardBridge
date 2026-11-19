@@ -94,6 +94,42 @@ static class HistoryCheck
             !images.Replay().Any(frame => frame.Kind == Wire.Delete && frame.Id.SequenceEqual(oldImage.Id)))
             throw new Exception("History migration or content type filter failed");
         Console.WriteLine("PASS: exact image deduplication, durable deletion, and content type filtering");
+        CheckRetention(args[0], start);
+    }
+
+    static void CheckRetention(string root, long start)
+    {
+        const int textCount = 125;
+        const int imageCount = 56;
+        string leftPath = Path.Combine(root, "retention-left");
+        var left = new ClipHistory(leftPath);
+        var right = new ClipHistory(Path.Combine(root, "retention-right"));
+        for (int i = 0; i < textCount; i++)
+            left.Apply(DatedText(start + i, "retained text " + i), true);
+        for (int i = 0; i < imageCount; i++)
+        {
+            // Exceed the old 64 MiB quota with three otherwise valid-sized payloads.
+            byte[] bytes = new byte[i < 53 ? 1 : 22 * 1024 * 1024];
+            bytes[0] = (byte)i;
+            Frame frame = new Frame(Wire.Image, Text(start + textCount + i).Id, bytes);
+            if (i % 2 == 0) left.Apply(frame, false);
+            else right.Apply(frame, false);
+        }
+        foreach (Frame frame in right.Replay()) Receive(left, frame);
+        foreach (Frame frame in left.Replay()) Receive(right, frame);
+        left = new ClipHistory(leftPath);
+        var expected = Enumerable.Range(6, 50).Reverse()
+            .Select(i => ClipHistory.Key(Text(start + textCount + i).Id)).ToArray();
+        foreach (ClipHistory history in new[] { left, right })
+        {
+            if (history.Search("", kind: Wire.Text).Length != textCount ||
+                !history.Search("", kind: Wire.Image).Select(e => e.Key).SequenceEqual(expected))
+                throw new Exception("Retention should keep all distinct text and the newest 50 images after sync");
+            var evicted = new Frame(Wire.Image, Text(start + textCount).Id, new byte[] { 0 });
+            if (history.Apply(evicted, false).Length != 0)
+                throw new Exception("An evicted image came back after replay");
+        }
+        Console.WriteLine("PASS: unlimited text, newest 50 images, and eviction replay");
     }
 
     static Frame DatedText(long time, string text)
@@ -103,6 +139,8 @@ static class HistoryCheck
 
     static void Receive(ClipHistory history, Frame frame)
     {
-        history.Apply(frame.Kind == Wire.HistoryText ? new Frame(Wire.Text, frame.Id, frame.Data) : frame, false);
+        if (frame.Kind == Wire.HistoryText) frame = new Frame(Wire.Text, frame.Id, frame.Data);
+        else if (frame.Kind == Wire.HistoryImage) frame = new Frame(Wire.Image, frame.Id, frame.Data);
+        history.Apply(frame, false);
     }
 }

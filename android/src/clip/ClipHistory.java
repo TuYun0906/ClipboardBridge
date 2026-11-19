@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.util.*;
 
 final class ClipHistory {
+    private static final int IMAGE_HISTORY_LIMIT = 50;
     static final String SAVE_IMAGES = "historyImages";
     private final File folder;
     private final Context context;
@@ -37,15 +38,11 @@ final class ClipHistory {
         try {
             for (Entry entry : entries())
                 if (!(entry.kind == Wire.IMAGE ? images : texts).add(entry.contentKey)) delete(entry.key);
-            trim(new ArrayList<>());
+            trimImages(new ArrayList<>());
         } catch (IOException ignored) { }
     }
 
     synchronized List<Wire.Frame> apply(Wire.Frame frame, boolean local) throws IOException {
-        return apply(frame, local, true);
-    }
-
-    private List<Wire.Frame> apply(Wire.Frame frame, boolean local, boolean trimAfter) throws IOException {
         String key = key(frame.id);
         List<Wire.Frame> changes = new ArrayList<>();
         if (frame.kind == Wire.DELETE) {
@@ -76,7 +73,7 @@ final class ClipHistory {
         records.put(key, incoming);
         changes.add(asHistory(frame));
         if (duplicate != null && delete(duplicate.key)) changes.add(tombstone(duplicate.key));
-        if (trimAfter) trim(changes);
+        if (incoming.kind == Wire.IMAGE) trimImages(changes);
         return changes;
     }
 
@@ -91,9 +88,8 @@ final class ClipHistory {
         String replacementKey = key(id);
         if (deleted.contains(replacementKey) || records.containsKey(replacementKey))
             throw new IOException("Duplicate history ID");
-        List<Wire.Frame> changes = apply(new Wire.Frame(Wire.TEXT, id, replacement.data), true, false);
+        List<Wire.Frame> changes = apply(new Wire.Frame(Wire.TEXT, id, replacement.data), true);
         if (delete(key)) changes.add(0, removal);
-        trim(changes);
         return changes;
     }
 
@@ -133,13 +129,14 @@ final class ClipHistory {
         return true;
     }
 
-    private void trim(List<Wire.Frame> changes) throws IOException {
-        int count = 0;
-        long bytes = 0;
-        for (Entry entry : entries()) {
-            bytes += entry.file.length();
-            if (++count <= 100 && bytes <= 64L * 1024 * 1024) continue;
-            if (delete(entry.key)) changes.add(tombstone(entry.key));
+    private void trimImages(List<Wire.Frame> changes) throws IOException {
+        List<Entry> images = new ArrayList<>();
+        for (Entry entry : records.values())
+            if (entry.kind == Wire.IMAGE) images.add(entry);
+        images.sort(Comparator.comparing((Entry entry) -> order(entry.key)).reversed());
+        for (int i = IMAGE_HISTORY_LIMIT; i < images.size(); i++) {
+            String key = images.get(i).key;
+            if (delete(key)) changes.add(tombstone(key));
         }
     }
 

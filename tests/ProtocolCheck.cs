@@ -34,6 +34,11 @@ static class ProtocolCheck
         Reject(huge);
         huge[0] = 0xff;
         Reject(huge);
+        var negative = new byte[21];
+        negative[0] = Wire.ImageInventory;
+        for (int i = 17; i < 20; i++) negative[i] = 0xff;
+        negative[20] = 0xf0;
+        Reject(negative);
     }
 
     static void Check(Frame frame, byte kind, byte[] id, byte[] data)

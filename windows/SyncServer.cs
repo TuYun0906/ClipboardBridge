@@ -18,6 +18,7 @@ internal sealed class SyncServer : ISyncConnection
     private readonly Action<Frame, Action<Frame>> receive;
     private readonly Action<bool> status;
     private readonly Func<IEnumerable<Frame>> replay;
+    private readonly Func<byte[]> inventory;
     private readonly object gate = new object();
     private readonly object clipboardGate = new object();
     private readonly HashSet<Peer> peers = new HashSet<Peer>();
@@ -41,12 +42,13 @@ internal sealed class SyncServer : ISyncConnection
     }
 
     internal SyncServer(IPAddress address, int port, Identity identity, Action<Frame, Action<Frame>> receive,
-        Action<bool> status, Func<IEnumerable<Frame>> replay = null, bool includeLoopback = false)
+        Action<bool> status, Func<IEnumerable<Frame>> replay = null, bool includeLoopback = false, Func<byte[]> inventory = null)
     {
         this.identity = identity;
         this.receive = receive;
         this.status = status;
         this.replay = replay;
+        this.inventory = inventory;
         this.includeLoopback = includeLoopback && !IPAddress.Loopback.Equals(address);
         listener = new TcpListener(address, port);
     }
@@ -81,6 +83,8 @@ internal sealed class SyncServer : ISyncConnection
             foreach (Peer peer in peers)
             {
                 if (peer.Link == null || peer == origin) continue;
+                if (frame.Kind == Wire.HistoryImage &&
+                    peer.Images.Any(image => image.SaveImage && image.Id.SequenceEqual(frame.Id))) continue;
                 peer.History.Enqueue(frame);
                 ScheduleWrite(peer);
             }
@@ -134,7 +138,7 @@ internal sealed class SyncServer : ISyncConnection
     {
         try
         {
-            using (TlsLink link = TlsLink.Accept(peer.Socket, identity.Certificate, identity.Key))
+            using (TlsLink link = TlsLink.Accept(peer.Socket, identity.Certificate, identity.Key, inventory))
             {
                 lock (gate)
                 {
@@ -162,7 +166,7 @@ internal sealed class SyncServer : ISyncConnection
                     else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
                     {
                         ApplyClipboard(frame, peer, relay);
-                        link.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
+                        link.Acknowledge(frame.Id);
                     }
                     else throw new IOException("Unexpected message");
                 }
@@ -231,7 +235,17 @@ internal sealed class SyncServer : ISyncConnection
                     else frame = peer.History.Dequeue();
                 }
                 if (frame == null)
-                    foreach (Frame entry in replay()) link.Send(entry);
+                    foreach (Frame entry in replay())
+                    {
+                        Frame urgent;
+                        lock (gate)
+                        {
+                            if (peer.Link != link) throw new IOException("Connection changed");
+                            urgent = peer.Images.Count > 0 ? peer.Images.Dequeue() : null;
+                        }
+                        if (urgent != null) link.Send(urgent);
+                        link.Send(entry);
+                    }
                 else link.Send(frame);
             }
         }

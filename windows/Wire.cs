@@ -6,18 +6,38 @@ internal sealed class Frame
     internal readonly byte Kind;
     internal readonly byte[] Id;
     internal readonly byte[] Data;
+    internal readonly bool SaveImage;
 
-    internal Frame(byte kind, byte[] id, byte[] data)
+    internal Frame(byte kind, byte[] id, byte[] data, bool saveImage = false)
     {
         Kind = kind;
         Id = id;
         Data = data;
+        SaveImage = saveImage;
     }
 }
 
 internal static class Wire
 {
     internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4, HistoryText = 5, HistoryImage = 6, Delete = 7;
+    internal const byte ImageInventory = 8, SavedImage = 9;
+    private static readonly byte[] SyncVersion = {67, 66, 73, 77, 71, 2, 117, 57};
+
+    internal static void OfferImageSync(byte[] id) { Array.Copy(SyncVersion, id, SyncVersion.Length); }
+
+    internal static bool OffersImageSync(byte[] id)
+    {
+        for (int i = 0; i < SyncVersion.Length; i++) if (id[i] != SyncVersion[i]) return false;
+        return true;
+    }
+
+    internal static byte[] AcceptImageSync(byte[] id)
+    {
+        var reply = (byte[])id.Clone();
+        reply[15] ^= 1;
+        return reply;
+    }
+
     internal const int IdSize = 16, KeySize = 32;
     // IDs carry image provenance through live sync, history replay, and older peers.
     private static readonly byte[] CompressedMark = { 0xC1, 0x19, 0x3B, 0xA6, 0x5D };
@@ -96,6 +116,8 @@ internal static class Wire
             case Ack: valid = count == 0; break;
             case HistoryText:
             case Text: valid = count > 0 && count <= TextLimit; break;
+            case ImageInventory: valid = count >= 0 && count <= 50 * IdSize && count % IdSize == 0; break;
+            case SavedImage:
             case HistoryImage:
             case Image: valid = count > 0 && count <= ImageLimit; break;
             default: valid = false; break;

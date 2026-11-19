@@ -10,16 +10,18 @@ import java.util.Set;
 import java.util.Base64;
 import java.util.function.Consumer;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLServerSocket;
-import javax.net.ssl.SSLSocket;
+import java.net.ServerSocket;
+import java.net.Socket;
 
 final class SyncHost implements Closeable {
     interface Receiver { void apply(Wire.Frame frame, Consumer<Wire.Frame> relay) throws IOException; }
 
-    private final SSLServerSocket listener;
+    private final ServerSocket listener;
+    private final SSLContext tls;
     private final Receiver receiver;
     private final Consumer<Boolean> status;
     private final SyncClient.Replay replay;
+    private java.util.function.Supplier<byte[]> inventory;
     private final byte[] key;
     private final Set<Peer> peers = new HashSet<>();
     private final Set<String> applied = new LinkedHashSet<>();
@@ -38,14 +40,14 @@ final class SyncHost implements Closeable {
     }
 
     private static final class Peer {
-        final SSLSocket socket;
+        final Socket socket;
         final ArrayDeque<ImageDelivery> images = new ArrayDeque<>();
         ImageDelivery sentImage;
         final ArrayDeque<Wire.Frame> history = new ArrayDeque<>();
         TlsLink link;
         Wire.Frame pending, sent;
         boolean writing, restore;
-        Peer(SSLSocket socket) { this.socket = socket; }
+        Peer(Socket socket) { this.socket = socket; }
     }
 
     SyncHost(SSLContext tls, byte[] key, int port, Receiver receiver,
@@ -54,8 +56,11 @@ final class SyncHost implements Closeable {
         this.status = status;
         this.replay = replay;
         this.key = key.clone();
-        listener = TlsLink.listen(tls, port);
+        this.tls = tls;
+        listener = TlsLink.listen(port);
     }
+
+    void imageInventory(java.util.function.Supplier<byte[]> inventory) { this.inventory = inventory; }
 
     void start() { startThread(this::accept, "clip-listen"); }
     int port() { return listener.getLocalPort(); }
@@ -77,8 +82,10 @@ final class SyncHost implements Closeable {
     }
 
     synchronized void cancelImage(Wire.Frame frame) {
+        frame.cancelled = true;
         waitingImages.removeIf(image -> image.frame == frame);
         for (Peer peer : peers) {
+            if (peer.link != null) peer.link.cancelWrite(frame);
             peer.images.removeIf(image -> image.frame == frame);
             if (peer.sentImage != null && peer.sentImage.frame == frame) {
                 peer.sentImage = null;
@@ -91,6 +98,8 @@ final class SyncHost implements Closeable {
         if (closed) return;
         for (Peer peer : peers) {
             if (peer == origin || peer.link == null) continue;
+            if (frame.kind == Wire.HISTORY_IMAGE && peer.images.stream()
+                    .anyMatch(image -> image.frame.saveImage && Arrays.equals(image.frame.id, frame.id))) continue;
             peer.history.add(frame);
             schedule(peer);
         }
@@ -99,7 +108,7 @@ final class SyncHost implements Closeable {
     private void accept() {
         for (;;) {
             try {
-                SSLSocket socket = (SSLSocket) listener.accept();
+                Socket socket = listener.accept();
                 synchronized (this) {
                     if (closed || peers.size() >= 16) { socket.close(); continue; }
                     Peer peer = new Peer(socket);
@@ -111,7 +120,7 @@ final class SyncHost implements Closeable {
     }
 
     private void read(Peer peer) {
-        try (TlsLink link = TlsLink.accept(peer.socket, key)) {
+        try (TlsLink link = TlsLink.accept(peer.socket, tls, key, inventory)) {
             synchronized (this) {
                 if (closed) return;
                 peer.link = link;
@@ -144,7 +153,7 @@ final class SyncHost implements Closeable {
                     receiver.apply(frame, change -> publish(change, change.kind == Wire.DELETE ? null : peer));
                 } else if (frame.kind == Wire.TEXT || frame.kind == Wire.IMAGE) {
                     applyClipboard(frame, peer);
-                    link.send(new Wire.Frame(Wire.ACK, frame.id, new byte[0]));
+                    link.acknowledge(frame.id);
                 } else throw new IOException("Unexpected message");
             }
         } catch (IOException | RuntimeException ignored) {
@@ -204,7 +213,18 @@ final class SyncHost implements Closeable {
                     else if (peer.restore) peer.restore = false;
                     else frame = peer.history.remove();
                 }
-                if (frame == null) replay.send(link::send);
+                if (frame == null) replay.send(entry -> {
+                    Wire.Frame urgent = null;
+                    synchronized (this) {
+                        if (peer.link != link) throw new IOException("Connection changed");
+                        if (!peer.images.isEmpty() && peer.sentImage == null) {
+                            peer.sentImage = peer.images.peek();
+                            urgent = peer.sentImage.frame;
+                        }
+                    }
+                    if (urgent != null) link.send(urgent);
+                    link.send(entry);
+                });
                 else link.send(frame);
             }
         } catch (IOException | RuntimeException failed) { closeSocket(peer); }

@@ -296,18 +296,24 @@ public final class SyncService extends Service {
     private void process(Object snapshot, boolean transmit, boolean confirmCapture) {
         try {
             Wire.Frame frame = clipboard.makeFrame(snapshot, transmit && prefs.getBoolean(Prefs.COMPRESS, false));
-            record(frame, true);
-            if (!transmit) return;
+            if (!transmit) { record(frame, true); return; }
+            Wire.Frame outgoing = withImageHistory(frame);
             main.post(() -> {
                 Runnable delivered = confirmCapture ? () -> main.post(this::showImageSent) : null;
-                if (host != null) host.submit(frame, delivered);
-                else if (client != null) client.submit(frame, delivered);
+                if (host != null) host.submit(outgoing, delivered);
+                else if (client != null) client.submit(outgoing, delivered);
                 else android.widget.Toast.makeText(this, hosting ? "Android 主机尚未启动" : "请先填写主机地址和配对码",
                         android.widget.Toast.LENGTH_SHORT).show();
+                worker.post(() -> record(outgoing, true));
             });
         } catch (IOException error) {
             main.post(() -> android.widget.Toast.makeText(this, "无法发送此内容", android.widget.Toast.LENGTH_SHORT).show());
         }
+    }
+
+    private Wire.Frame withImageHistory(Wire.Frame frame) {
+        return frame.kind == Wire.IMAGE && prefs.getBoolean(ClipHistory.SAVE_IMAGES, false)
+                ? new Wire.Frame(frame.kind, frame.id, frame.data, true) : frame;
     }
 
     boolean capturePeerConnected() {
@@ -317,7 +323,7 @@ public final class SyncService extends Service {
     void sendCapture(Bitmap image, Object request) {
         if (!worker.post(() -> {
             try {
-                Wire.Frame frame = clipboard.makeFrame(image, prefs.getBoolean(Prefs.COMPRESS, false));
+                Wire.Frame frame = withImageHistory(clipboard.makeFrame(image, prefs.getBoolean(Prefs.COMPRESS, false)));
                 main.post(() -> {
                     if (destroyed || !screenshot.isSending(request)) return;
                     if (!capturePeerConnected()) {
@@ -403,6 +409,7 @@ public final class SyncService extends Service {
                             if (currentConnection == connection && host != null)
                                 setStatus(connected ? "主机已连接" : "主机已启动，等待连接");
                             }), history::replay);
+                    next.imageInventory(history::imageInventory);
                     hostIdentity = result;
                     currentConnection = connection;
                     host = next;
@@ -421,14 +428,14 @@ public final class SyncService extends Service {
         Wire.Frame entry = frame;
         if (frame.kind < Wire.HISTORY_TEXT) {
             clipboard.apply(frame);
-            if (frame.kind != Wire.TEXT) return;
+            if (frame.kind != Wire.TEXT && !frame.saveImage) return;
         } else if (frame.kind != Wire.DELETE) {
             entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data);
         }
         try {
             java.util.List<Wire.Frame> changes = history.apply(entry, false);
             for (Wire.Frame change : changes)
-                if (relay != null) relay.accept(change);
+                if (relay != null && (!frame.saveImage || change.kind == Wire.DELETE)) relay.accept(change);
             historyChanged(changes);
         } catch (IOException error) {
             android.util.Log.w("ClipHistory", "History write failed", error);
@@ -467,6 +474,7 @@ public final class SyncService extends Service {
                         }));
                 setStatus("正在连接…");
                 client.replayWith(history::replay);
+                client.imageInventory(history::imageInventory);
                 client.start();
             }
         }

@@ -175,7 +175,13 @@ internal sealed class WindowsClipboard : IDisposable
         ValidateDimensions(bitmap);
         byte[] result;
         int originalBytes = 0;
-        if (!compress) result = Encode(bitmap, new PngBitmapEncoder());
+        if (!compress)
+        {
+            bool encoded = image != null && IsStandardImage(image);
+            bool bmp = encoded && image[0] == 'B' && image[1] == 'M';
+            result = encoded && !bmp ? image : Encode(bitmap, new PngBitmapEncoder());
+            if (bmp && image.Length < result.Length) result = image;
+        }
         else if (image != null && IsGif(image)) result = image;
         else
         {

@@ -28,13 +28,17 @@ final class SyncClient implements Closeable {
     private final java.util.IdentityHashMap<Wire.Frame, Runnable> confirmations = new java.util.IdentityHashMap<>();
     private final ArrayDeque<Wire.Frame> history = new ArrayDeque<>();
     private Replay replay;
+    private java.util.function.Supplier<byte[]> inventory;
     private boolean replayNeeded;
 
     void replayWith(Replay replay) { this.replay = replay; }
+    void imageInventory(java.util.function.Supplier<byte[]> inventory) { this.inventory = inventory; }
 
     void publish(Wire.Frame frame) {
         synchronized (lock) {
             if (closed || link == null) return;
+            if (frame.kind == Wire.HISTORY_IMAGE &&
+                    images.stream().anyMatch(image -> image.saveImage && Arrays.equals(image.id, frame.id))) return;
             history.add(frame);
             scheduleWrite();
         }
@@ -68,6 +72,8 @@ final class SyncClient implements Closeable {
 
     void cancelImage(Wire.Frame frame) {
         synchronized (lock) {
+            frame.cancelled = true;
+            if (link != null) link.cancelWrite(frame);
             if (!images.remove(frame)) return;
             confirmations.remove(frame);
             if (sentImage == frame) sentImage = null;
@@ -78,7 +84,7 @@ final class SyncClient implements Closeable {
     private void run() {
         while (!isClosed()) {
             boolean connected = false;
-            try (TlsLink current = TlsLink.connect(host, port, pin, key)) {
+            try (TlsLink current = TlsLink.connect(host, port, pin, key, inventory)) {
                 synchronized (lock) {
                     if (closed) return;
                     link = current;
@@ -108,7 +114,7 @@ final class SyncClient implements Closeable {
                             receiver.apply(frame);
                             if (frame.kind < Wire.HISTORY_TEXT) lastApplied = frame.id;
                         }
-                        if (frame.kind < Wire.HISTORY_TEXT) current.send(new Wire.Frame(Wire.ACK, frame.id, new byte[0]));
+                        if (frame.kind < Wire.HISTORY_TEXT) current.acknowledge(frame.id);
                     }
                 }
             } catch (IOException | RuntimeException ignored) {
@@ -152,7 +158,15 @@ final class SyncClient implements Closeable {
                 else frame = history.remove();
             }
             try {
-                if (restore) replay.send(current::send);
+                if (restore) replay.send(entry -> {
+                    Wire.Frame urgent;
+                    synchronized (lock) {
+                        if (link != current) throw new IOException("Connection changed");
+                        urgent = !images.isEmpty() && sentImage == null ? (sentImage = images.peek()) : null;
+                    }
+                    if (urgent != null) current.send(urgent);
+                    current.send(entry);
+                });
                 else current.send(frame);
             }
             catch (IOException failed) {

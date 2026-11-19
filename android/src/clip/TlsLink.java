@@ -3,7 +3,8 @@ package clip;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import javax.net.ssl.SSLServerSocket;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -18,44 +19,62 @@ import javax.net.ssl.X509TrustManager;
 final class TlsLink implements Closeable {
     private static final SecureRandom RANDOM = new SecureRandom();
     private final SSLSocket socket;
+    private final Socket transport;
     private final Object sendLock = new Object();
+    private final java.util.Set<String> knownImages = new java.util.LinkedHashSet<>();
+    private volatile boolean imageSync;
+    private volatile Wire.Frame writingFrame;
+    private final java.util.ArrayDeque<Wire.Frame> acknowledgements = new java.util.ArrayDeque<>();
+    private boolean ackWriterScheduled;
 
-    private TlsLink(SSLSocket socket) {
+    private TlsLink(SSLSocket socket, Socket transport) {
         this.socket = socket;
+        this.transport = transport;
     }
 
     static TlsLink connect(String host, int port, byte[] pin, byte[] key) throws IOException {
+        return connect(host, port, pin, key, null);
+    }
+
+    static TlsLink connect(String host, int port, byte[] pin, byte[] key,
+            java.util.function.Supplier<byte[]> inventory) throws IOException {
         if (pin.length != 32 || key.length != Wire.KEY_SIZE)
             throw new IOException("Invalid pairing credentials");
 
-        SSLSocket socket = createSocket(pin.clone());
+        Socket transport = new Socket();
+        SSLSocket socket = null;
         try {
+            transport.connect(new InetSocketAddress(host, port), 6000);
+            socket = (SSLSocket) clientContext(pin.clone()).getSocketFactory().createSocket(transport, host, port, true);
+            socket.setUseClientMode(true);
             socket.setEnabledProtocols(new String[] {"TLSv1.2"});
             socket.setTcpNoDelay(true);
             socket.setSoTimeout(6000);
-            socket.connect(new InetSocketAddress(host, port), 6000);
             socket.startHandshake();
 
-            TlsLink link = new TlsLink(socket);
+            TlsLink link = new TlsLink(socket, transport);
             byte[] id = new byte[Wire.ID_SIZE];
             RANDOM.nextBytes(id);
+            if (inventory != null) Wire.offerImageSync(id);
             link.send(new Wire.Frame(Wire.AUTH, id, key));
             Wire.Frame ack = link.read();
-            if (ack == null || ack.kind != Wire.ACK || !Arrays.equals(ack.id, id))
-                throw new IOException("Pairing rejected");
+            if (ack == null || ack.kind != Wire.ACK) throw new IOException("Pairing rejected");
+            if (inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id))) {
+                link.readInventory();
+                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, id, inventory.get()));
+                link.imageSync = true;
+            } else if (!Arrays.equals(ack.id, id)) throw new IOException("Pairing rejected");
             socket.setSoTimeout(0);
             return link;
         } catch (IOException | RuntimeException failure) {
-            try { socket.close(); }
-            catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
+            closeFailedHandshake(transport, socket, failure);
             throw failure;
         }
     }
 
-    static SSLServerSocket listen(SSLContext context, int port) throws IOException {
-        SSLServerSocket server = (SSLServerSocket) context.getServerSocketFactory().createServerSocket();
+    static ServerSocket listen(int port) throws IOException {
+        ServerSocket server = new ServerSocket();
         try {
-            server.setEnabledProtocols(new String[] {"TLSv1.2"});
             server.setReuseAddress(true);
             server.bind(new InetSocketAddress(port), 8);
             return server;
@@ -65,36 +84,136 @@ final class TlsLink implements Closeable {
         }
     }
 
-    static TlsLink accept(SSLSocket socket, byte[] key) throws IOException {
-        socket.setTcpNoDelay(true);
-        socket.setSoTimeout(6000);
-        socket.startHandshake();
-        TlsLink link = new TlsLink(socket);
-        Wire.Frame hello = link.read();
-        if (hello == null || hello.kind != Wire.AUTH || !MessageDigest.isEqual(key, hello.data))
-            throw new IOException("Pairing rejected");
-        link.send(new Wire.Frame(Wire.ACK, hello.id, new byte[0]));
-        socket.setSoTimeout(0);
-        return link;
+    static TlsLink accept(Socket transport, SSLContext context, byte[] key,
+            java.util.function.Supplier<byte[]> inventory) throws IOException {
+        SSLSocket socket = null;
+        try {
+            socket = (SSLSocket) context.getSocketFactory().createSocket(transport,
+                    transport.getInetAddress().getHostAddress(), transport.getPort(), true);
+            socket.setUseClientMode(false);
+            socket.setEnabledProtocols(new String[] {"TLSv1.2"});
+            socket.setTcpNoDelay(true);
+            socket.setSoTimeout(6000);
+            socket.startHandshake();
+            TlsLink link = new TlsLink(socket, transport);
+            Wire.Frame hello = link.read();
+            if (hello == null || hello.kind != Wire.AUTH || !MessageDigest.isEqual(key, hello.data))
+                throw new IOException("Pairing rejected");
+            boolean upgraded = inventory != null && Wire.offersImageSync(hello.id);
+            link.send(new Wire.Frame(Wire.ACK, upgraded ? Wire.acceptImageSync(hello.id) : hello.id, new byte[0]));
+            if (upgraded) {
+                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, hello.id, inventory.get()));
+                link.readInventory();
+                link.imageSync = true;
+            }
+            socket.setSoTimeout(0);
+            return link;
+        } catch (IOException | RuntimeException failure) {
+            closeFailedHandshake(transport, socket, failure);
+            throw failure;
+        }
+    }
+
+    private static void closeFailedHandshake(Socket transport, SSLSocket socket, Exception failure) {
+        try { transport.close(); }
+        catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
+        if (socket == null) return;
+        try { socket.close(); }
+        catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
     }
 
     Wire.Frame read() throws IOException {
-        return Wire.read(socket.getInputStream());
+        Wire.Frame frame = Wire.read(socket.getInputStream());
+        if (imageSync && frame != null && frame.kind == Wire.SAVED_IMAGE)
+            return new Wire.Frame(Wire.IMAGE, frame.id, frame.data, true);
+        return frame;
     }
 
     void send(Wire.Frame frame) throws IOException {
-        synchronized (sendLock) { Wire.write(socket.getOutputStream(), frame); }
+        synchronized (sendLock) {
+            flushAcknowledgements();
+            writingFrame = frame;
+            try {
+                if (frame.cancelled) return;
+                String key = imageKey(frame.id);
+                if (frame.kind == Wire.HISTORY_IMAGE && knownImages.contains(key)) return;
+                if (frame.kind == Wire.DELETE) knownImages.remove(key);
+                boolean savedLive = frame.kind == Wire.IMAGE && frame.saveImage;
+                Wire.Frame outgoing = imageSync && savedLive
+                        ? new Wire.Frame(Wire.SAVED_IMAGE, frame.id, frame.data) : frame;
+                Wire.write(socket.getOutputStream(), outgoing);
+                if (savedLive && !imageSync && !frame.cancelled && !knownImages.contains(key))
+                    Wire.write(socket.getOutputStream(), new Wire.Frame(Wire.HISTORY_IMAGE, frame.id, frame.data));
+                if (frame.kind == Wire.HISTORY_IMAGE || savedLive) rememberImage(key);
+            } finally { writingFrame = null; }
+        }
     }
+
+    void acknowledge(byte[] id) {
+        synchronized (acknowledgements) {
+            acknowledgements.add(new Wire.Frame(Wire.ACK, id, new byte[0]));
+            if (ackWriterScheduled) return;
+            ackWriterScheduled = true;
+        }
+        // Keep the receive thread reading even when an outgoing image holds the write lock.
+        Thread worker = new Thread(this::writeAcknowledgements, "clip-ack");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void writeAcknowledgements() {
+        try {
+            synchronized (sendLock) { flushAcknowledgements(); }
+        } catch (IOException failure) {
+            try { close(); } catch (IOException ignored) { }
+        }
+    }
+
+    private void flushAcknowledgements() throws IOException {
+        for (;;) {
+            Wire.Frame ack;
+            synchronized (acknowledgements) {
+                ack = acknowledgements.poll();
+                if (ack == null) { ackWriterScheduled = false; return; }
+            }
+            Wire.write(socket.getOutputStream(), ack);
+        }
+    }
+
+    void cancelWrite(Wire.Frame frame) {
+        if (writingFrame != frame) return;
+        // Abort TCP instead of waiting for a TLS close or for buffered bytes to drain.
+        try { transport.setSoLinger(true, 0); } catch (IOException ignored) { }
+        try { transport.close(); } catch (IOException ignored) { }
+    }
+
+    private void readInventory() throws IOException {
+        Wire.Frame frame = read();
+        if (frame == null || frame.kind != Wire.IMAGE_INVENTORY) throw new IOException("Image inventory missing");
+        for (int offset = 0; offset < frame.data.length; offset += Wire.ID_SIZE)
+            rememberImage(imageKey(Arrays.copyOfRange(frame.data, offset, offset + Wire.ID_SIZE)));
+    }
+
+    private void rememberImage(String key) {
+        knownImages.add(key);
+        if (knownImages.size() > 128) {
+            java.util.Iterator<String> oldest = knownImages.iterator();
+            oldest.next();
+            oldest.remove();
+        }
+    }
+
+    private static String imageKey(byte[] id) { return java.util.Base64.getEncoder().encodeToString(id); }
 
     @Override public void close() throws IOException {
         socket.close();
     }
 
-    private static SSLSocket createSocket(byte[] pin) throws IOException {
+    private static SSLContext clientContext(byte[] pin) throws IOException {
         try {
             SSLContext context = SSLContext.getInstance("TLS");
             context.init(null, new TrustManager[] {new PinnedCertificate(pin)}, RANDOM);
-            return (SSLSocket) context.getSocketFactory().createSocket();
+            return context;
         } catch (GeneralSecurityException error) {
             throw new IOException("TLS unavailable", error);
         }

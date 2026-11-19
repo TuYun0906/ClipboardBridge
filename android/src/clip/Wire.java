@@ -8,6 +8,22 @@ import java.io.OutputStream;
 
 final class Wire {
     static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4, HISTORY_TEXT = 5, HISTORY_IMAGE = 6, DELETE = 7;
+    static final int IMAGE_INVENTORY = 8, SAVED_IMAGE = 9;
+    private static final byte[] SYNC_VERSION = {67, 66, 73, 77, 71, 2, 117, 57};
+
+    static void offerImageSync(byte[] id) { System.arraycopy(SYNC_VERSION, 0, id, 0, SYNC_VERSION.length); }
+
+    static boolean offersImageSync(byte[] id) {
+        for (int i = 0; i < SYNC_VERSION.length; i++) if (id[i] != SYNC_VERSION[i]) return false;
+        return true;
+    }
+
+    static byte[] acceptImageSync(byte[] id) {
+        byte[] reply = id.clone();
+        reply[15] ^= 1;
+        return reply;
+    }
+
     static final int ID_SIZE = 16, KEY_SIZE = 32;
     // Preserve provenance without changing the frame layout understood by older peers.
     private static final byte[] COMPRESSED_MARK = {(byte)0xC1, 0x19, 0x3B, (byte)0xA6, 0x5D};
@@ -38,11 +54,16 @@ final class Wire {
         final int kind;
         final byte[] id;
         final byte[] data;
+        final boolean saveImage;
+        volatile boolean cancelled;
 
-        Frame(int kind, byte[] id, byte[] data) {
+        Frame(int kind, byte[] id, byte[] data) { this(kind, id, data, false); }
+
+        Frame(int kind, byte[] id, byte[] data, boolean saveImage) {
             this.kind = kind;
             this.id = id;
             this.data = data;
+            this.saveImage = saveImage;
         }
     }
 
@@ -78,6 +99,8 @@ final class Wire {
             case ACK: valid = count == 0; break;
             case HISTORY_TEXT:
             case TEXT: valid = count > 0 && count <= TEXT_LIMIT; break;
+            case IMAGE_INVENTORY: valid = count >= 0 && count <= 50 * ID_SIZE && count % ID_SIZE == 0; break;
+            case SAVED_IMAGE:
             case HISTORY_IMAGE:
             case IMAGE: valid = count > 0 && count <= IMAGE_LIMIT; break;
             default: valid = false; break;

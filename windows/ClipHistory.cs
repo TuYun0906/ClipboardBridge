@@ -124,6 +124,13 @@ internal sealed class ClipHistory
                     e.Text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
     }
 
+    internal byte[] ImageInventory()
+    {
+        lock (entries)
+            return entries.Values.Where(e => e.Kind == Wire.Image).Take(ImageHistoryLimit)
+                .SelectMany(e => Tombstone(e.Key).Id).ToArray();
+    }
+
     internal IEnumerable<Frame> Replay()
     {
         string[] tombstones;

@@ -33,7 +33,7 @@ internal static class AndroidHostCheck
         Array.Copy(key, 0, pair, 32, 32);
         var received = new BlockingCollection<Frame>();
         using (var client = new SyncClient(new Uri("tcp://127.0.0.1:" + port), pair,
-            (frame, publish) => received.Add(frame), connected => {}, () => new Frame[0]))
+            (frame, publish) => received.Add(frame), connected => {}, () => new Frame[0], () => Make(Wire.Image, 9, "").Id))
         {
             client.Start();
             Check(received, Wire.HistoryText, "host history");
@@ -41,6 +41,7 @@ internal static class AndroidHostCheck
             for (byte i = 11; i <= 13; i++)
             {
                 Frame image = Make(Wire.Image, i, "image " + i);
+                if (i == 11) image = new Frame(image.Kind, image.Id, image.Data, true);
                 if (i == 12) Wire.MarkCompressed(image.Id, 70, 100);
                 client.Submit(image);
             }
@@ -69,6 +70,7 @@ internal static class AndroidHostCheck
             if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind + ": " + text);
         } while (frame.Kind == Wire.Delete);
         if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text ||
+            (kind == Wire.Image && frame.SaveImage != (text == "host image 21")) ||
             (kind == Wire.Image && Wire.CompressionPercent(frame.Id) != (text == "host image 22" ? 70 : -1)))
             throw new Exception("Expected " + text + "; got " + frame.Kind + ": " + Encoding.UTF8.GetString(frame.Data));
     }

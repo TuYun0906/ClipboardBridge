@@ -21,6 +21,7 @@ internal sealed class SyncClient : ISyncConnection
     private readonly Action<Frame, Action<Frame>> receive;
     private readonly Action<bool> status;
     private readonly Func<IEnumerable<Frame>> replay;
+    private readonly Func<byte[]> inventory;
     private readonly Queue<Frame> history = new Queue<Frame>();
     private bool closed, writing, replayNeeded;
     private TcpClient socket;
@@ -31,7 +32,7 @@ internal sealed class SyncClient : ISyncConnection
     private byte[] lastReceived;
 
     internal SyncClient(Uri endpoint, byte[] pairing, Action<Frame, Action<Frame>> receive,
-        Action<bool> status, Func<IEnumerable<Frame>> replay)
+        Action<bool> status, Func<IEnumerable<Frame>> replay, Func<byte[]> inventory = null)
     {
         this.endpoint = endpoint;
         pin = pairing.Take(32).ToArray();
@@ -39,6 +40,7 @@ internal sealed class SyncClient : ISyncConnection
         this.receive = receive;
         this.status = status;
         this.replay = replay;
+        this.inventory = inventory;
     }
 
     internal static bool TryEndpoint(string value, out Uri endpoint)
@@ -82,6 +84,8 @@ internal sealed class SyncClient : ISyncConnection
         lock (gate)
         {
             if (closed || link == null) return;
+            if (frame.Kind == Wire.HistoryImage &&
+                images.Any(image => image.SaveImage && image.Id.SequenceEqual(frame.Id))) return;
             history.Enqueue(frame);
             ScheduleWrite();
         }
@@ -100,7 +104,7 @@ internal sealed class SyncClient : ISyncConnection
             try
             {
                 int port = endpoint.IsDefaultPort ? 47832 : endpoint.Port;
-                using (var current = TlsLink.Connect(connecting, endpoint.DnsSafeHost, port, pin, key))
+                using (var current = TlsLink.Connect(connecting, endpoint.DnsSafeHost, port, pin, key, inventory))
                 {
                     lock (gate)
                     {
@@ -134,7 +138,7 @@ internal sealed class SyncClient : ISyncConnection
                                 receive(frame, Publish);
                                 lastReceived = frame.Id;
                             }
-                            current.Send(new Frame(Wire.Ack, frame.Id, new byte[0]));
+                            current.Acknowledge(frame.Id);
                         }
                         else throw new IOException("Unexpected message");
                     }
@@ -195,7 +199,17 @@ internal sealed class SyncClient : ISyncConnection
             try
             {
                 if (frame != null) current.Send(frame);
-                else foreach (var entry in replay()) current.Send(entry);
+                else foreach (var entry in replay())
+                {
+                    Frame urgent = null;
+                    lock (gate)
+                    {
+                        if (link != current) throw new IOException("Connection changed");
+                        if (images.Count > 0 && sentImage == null) urgent = sentImage = images.Peek();
+                    }
+                    if (urgent != null) current.Send(urgent);
+                    current.Send(entry);
+                }
             }
             catch (IOException) { Disconnect(current); }
             catch (ObjectDisposedException) { Disconnect(current); }

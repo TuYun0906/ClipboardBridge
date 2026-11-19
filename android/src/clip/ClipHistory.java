@@ -99,6 +99,17 @@ final class ClipHistory {
         return result;
     }
 
+    synchronized byte[] imageInventory() {
+        ByteArrayOutputStream ids = new ByteArrayOutputStream();
+        for (Entry entry : records.values()) {
+            if (entry.kind != Wire.IMAGE) continue;
+            byte[] id = tombstone(entry.key).id;
+            ids.write(id, 0, id.length);
+            if (ids.size() == IMAGE_HISTORY_LIMIT * Wire.ID_SIZE) break;
+        }
+        return ids.toByteArray();
+    }
+
     void replay(SyncClient.Sender sender) throws IOException {
         List<String> tombstones;
         List<Entry> snapshot;

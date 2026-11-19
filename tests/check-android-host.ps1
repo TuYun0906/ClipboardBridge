@@ -37,7 +37,7 @@ try {
     & $exe $port.Result $der
     if ($LASTEXITCODE) { throw 'Windows-to-Android host exchange failed' }
     if (!$hostProcess.WaitForExit(8000) -or $hostProcess.ExitCode) { throw 'Android host relay failed' }
-    'PASS: Android host authentication, Windows and Android peers, clipboard, history edits and deletion'
+    'PASS: Android host authentication, Windows and Android peers, clipboard, history edits and deletion, negotiated image deduplication, and cancellation'
 } finally {
     if (!$hostProcess.HasExited) { $hostProcess.Kill() }
     $hostProcess.Dispose()

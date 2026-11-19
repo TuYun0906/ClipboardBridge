@@ -288,7 +288,12 @@ internal sealed class Program : IDisposable
             try
             {
                 Frame frame = WindowsClipboard.ToFrame(content, compress);
-                if (target != null) target.Submit(frame);
+                if (target != null)
+                {
+                    if (frame.Kind == Wire.Image && History.SaveImages)
+                        frame = new Frame(frame.Kind, frame.Id, frame.Data, true);
+                    target.Submit(frame);
+                }
                 Record(frame, true);
             }
             catch (Exception error)
@@ -316,6 +321,10 @@ internal sealed class Program : IDisposable
             {
                 app.Dispatcher.Invoke(new Action(() => Clipboard.SetDataObject(value, false)));
                 if (frame.Kind == Wire.Text) Record(frame, false, relay);
+                else if (frame.SaveImage) Record(frame, false, relay == null ? (Action<Frame>)null : change =>
+                {
+                    if (change.Kind == Wire.Delete) relay(change);
+                });
                 return;
             }
             catch (ExternalException) { Thread.Sleep(45); }
@@ -345,7 +354,7 @@ internal sealed class Program : IDisposable
                 app.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (connection == client) SetStatus(connected ? "已连接到 Android 主机" : "正在连接 Android 主机…");
-                })), History.Replay);
+                })), History.Replay, History.ImageInventory);
             connection = client;
             SetStatus("正在连接 Android 主机…");
             client.Start();
@@ -364,7 +373,7 @@ internal sealed class Program : IDisposable
                 app.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (connection == next) SetStatus(connected ? "已连接" : "等待手机连接");
-                })), History.Replay, includeLoopback: !PublicMode);
+                })), History.Replay, includeLoopback: !PublicMode, inventory: History.ImageInventory);
             connection = next;
             next.Start();
             SetStatus("等待手机连接");

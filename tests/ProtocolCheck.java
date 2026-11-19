@@ -33,6 +33,11 @@ public final class ProtocolCheck {
         reject(huge);
         huge[0] = (byte) 0xff;
         reject(huge);
+        byte[] negative = new byte[21];
+        Arrays.fill(negative, 17, 21, (byte) 0xff);
+        negative[0] = Wire.IMAGE_INVENTORY;
+        negative[20] = (byte) 0xf0;
+        reject(negative);
     }
 
     private static void check(Wire.Frame frame, int kind, byte[] id, byte[] data) {

@@ -43,6 +43,7 @@ final class ScreenshotBubble {
     private ImageReader reader;
     private Object request;
     private Runnable timeout;
+    private long deadline;
     private int feedbackVersion;
     private long lastAuthorizationTap = -1000;
 
@@ -225,8 +226,9 @@ final class ScreenshotBubble {
         feedbackVersion++;
         button.setText("发送中");
         button.setVisibility(View.INVISIBLE);
-        timeout = () -> finish(id, "发送超时", false);
-        main.postDelayed(timeout, 30000);
+        deadline = android.os.SystemClock.uptimeMillis() + 10000;
+        timeout = () -> finish(id, "发送失败", false);
+        main.postAtTime(timeout, deadline);
         // Give the compositor time to remove the overlay before attaching a fresh reader.
         main.postDelayed(() -> capture(id), 180);
     }
@@ -241,7 +243,7 @@ final class ScreenshotBubble {
     }
 
     private void capture(Object id) {
-        if (request != id || display == null || !isVisible()) return;
+        if (!isSending(id) || display == null || !isVisible()) return;
         try {
             DisplayMetrics metrics = dimensions();
             int width = metrics.widthPixels, height = metrics.heightPixels;
@@ -289,7 +291,12 @@ final class ScreenshotBubble {
         service.sendCapture(frame, id);
     }
 
-    boolean isSending(Object id) { return request == id; }
+    boolean isSending(Object id) {
+        if (request != id) return false;
+        if (android.os.SystemClock.uptimeMillis() < deadline) return true;
+        finish(id, "发送失败", false);
+        return false;
+    }
 
     void delivered(Object id) {
         if (id != null) finish(id, "发送成功", true);

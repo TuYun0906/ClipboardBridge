@@ -1,7 +1,11 @@
 package clip;
 
 import android.animation.ObjectAnimator;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Insets;
+import android.graphics.Rect;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
@@ -10,19 +14,30 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Handler;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.WindowInsets;
+import android.view.WindowMetrics;
 import android.view.WindowManager;
 import android.widget.TextView;
 
 final class ScreenshotBubble {
+    private static final String OFFSET_RIGHT = "screenshot_bubble_right";
+    private static final String OFFSET_TOP = "screenshot_bubble_top";
     private final SyncService service;
     private final Handler main;
     private final WindowManager windows;
+    private final SharedPreferences prefs;
+    private WindowManager overlayWindows;
     private TextView button;
+    private WindowManager.LayoutParams position;
+    private int preferredRight, preferredTop;
     private MediaProjection projection;
     private VirtualDisplay display;
     private ImageReader reader;
@@ -35,6 +50,7 @@ final class ScreenshotBubble {
         this.service = service;
         this.main = main;
         windows = service.getSystemService(WindowManager.class);
+        prefs = Prefs.get(service);
     }
 
     boolean isVisible() { return button != null && Settings.canDrawOverlays(service); }
@@ -45,20 +61,122 @@ final class ScreenshotBubble {
             return;
         }
         if (button != null) return;
-        TextView view = Style.action(service, "截屏", true, this::tap);
+        Context overlayContext = service;
+        if (Build.VERSION.SDK_INT >= 30) {
+            overlayContext = service.createDisplayContext(windows.getDefaultDisplay())
+                    .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
+        }
+        WindowManager manager = overlayContext.getSystemService(WindowManager.class);
+        TextView view = Style.action(overlayContext, "截屏", true, this::tap);
         view.setElevation(Style.dp(service, 5));
         WindowManager.LayoutParams layout = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, Style.dp(service, 44),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
         layout.gravity = Gravity.TOP | Gravity.RIGHT;
-        layout.x = Style.dp(service, 10);
-        layout.y = Style.dp(service, 112);
+        if (Build.VERSION.SDK_INT >= 30) {
+            layout.setFitInsetsTypes(overlayInsets());
+            layout.setFitInsetsIgnoringVisibility(true);
+        }
+        preferredRight = prefs.getInt(OFFSET_RIGHT, Style.dp(service, 10));
+        preferredTop = prefs.getInt(OFFSET_TOP, Style.dp(service, 112));
+        layout.x = preferredRight;
+        layout.y = preferredTop;
+        view.setOnTouchListener(new BubbleDrag(ViewConfiguration.get(view.getContext()).getScaledTouchSlop()));
+        view.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) ->
+                keepOnScreen());
         try {
-            windows.addView(view, layout);
+            manager.addView(view, layout);
+            overlayWindows = manager;
             button = view;
+            position = layout;
         } catch (WindowManager.BadTokenException | WindowManager.InvalidDisplayException | SecurityException error) {
             android.util.Log.w("ClipCapture", "Could not show screenshot button", error);
+        }
+    }
+
+    void keepOnScreen() {
+        if (button != null) move(preferredRight, preferredTop);
+    }
+
+    private static int overlayInsets() {
+        return WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout();
+    }
+
+    private void move(int right, int top) {
+        if (button == null || !button.isAttachedToWindow()) return;
+        int width, height;
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowMetrics metrics = overlayWindows.getMaximumWindowMetrics();
+            Rect bounds = metrics.getBounds();
+            Insets insets = metrics.getWindowInsets().getInsetsIgnoringVisibility(overlayInsets());
+            width = bounds.width() - insets.left - insets.right;
+            height = bounds.height() - insets.top - insets.bottom;
+        } else {
+            DisplayMetrics metrics = new DisplayMetrics();
+            windows.getDefaultDisplay().getMetrics(metrics);
+            width = metrics.widthPixels;
+            height = metrics.heightPixels;
+        }
+        int x = Math.max(0, Math.min(right, width - button.getWidth()));
+        int y = Math.max(0, Math.min(top, height - button.getHeight()));
+        if (position.x == x && position.y == y) return;
+        position.x = x;
+        position.y = y;
+        overlayWindows.updateViewLayout(button, position);
+    }
+
+    private final class BubbleDrag implements View.OnTouchListener {
+        private final int touchSlop;
+        private float startX, startY;
+        private int startRight, startTop;
+        private boolean dragging, multiTouch;
+
+        BubbleDrag(int touchSlop) { this.touchSlop = touchSlop; }
+
+        @Override public boolean onTouch(View view, MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    startX = event.getRawX();
+                    startY = event.getRawY();
+                    startRight = position.x;
+                    startTop = position.y;
+                    dragging = multiTouch = false;
+                    view.setPressed(true);
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    multiTouch = true;
+                    view.setPressed(false);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                case MotionEvent.ACTION_UP:
+                    float dx = event.getRawX() - startX;
+                    float dy = event.getRawY() - startY;
+                    if (!multiTouch) {
+                        if (dx * dx + dy * dy > touchSlop * touchSlop) dragging = true;
+                        if (dragging) {
+                            view.setPressed(false);
+                            move(startRight - Math.round(dx), startTop + Math.round(dy));
+                            preferredRight = position.x;
+                            preferredTop = position.y;
+                        }
+                    }
+                    if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                        view.setPressed(false);
+                        if (dragging) rememberPosition();
+                        else if (!multiTouch) view.performClick();
+                    }
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    view.setPressed(false);
+                    if (dragging) rememberPosition();
+                    break;
+            }
+            return true;
+        }
+
+        private void rememberPosition() {
+            prefs.edit().putInt(OFFSET_RIGHT, preferredRight).putInt(OFFSET_TOP, preferredTop).apply();
         }
     }
 
@@ -235,8 +353,10 @@ final class ScreenshotBubble {
         if (request != null) service.finishCapture(request, false);
         request = null;
         if (button != null) {
-            windows.removeViewImmediate(button);
+            overlayWindows.removeViewImmediate(button);
             button = null;
+            overlayWindows = null;
+            position = null;
         }
     }
 }

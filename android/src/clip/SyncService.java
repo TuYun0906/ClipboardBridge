@@ -153,6 +153,11 @@ public final class SyncService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
+    @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        main.post(screenshot::keepOnScreen);
+    }
+
     @Override public void onDestroy() {
         destroyed = true;
         getSystemService(android.net.ConnectivityManager.class).unregisterNetworkCallback(networkChanges);

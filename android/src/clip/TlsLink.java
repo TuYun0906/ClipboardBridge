@@ -195,9 +195,11 @@ final class TlsLink implements Closeable {
                 boolean savedLive = frame.kind == Wire.IMAGE && frame.saveImage;
                 Wire.Frame outgoing = imageSync && savedLive
                         ? new Wire.Frame(Wire.SAVED_IMAGE, frame.id, frame.data) : frame;
-                if (imageParts && frame.kind == Wire.IMAGE && frame.deadlineNanos != 0) {
+                if (imageParts && frame.kind == Wire.IMAGE &&
+                        (frame.deadlineNanos != 0 || frame.uploadProgress != null)) {
                     if (!writeImageParts(frame)) return;
-                } else Wire.write(socket.getOutputStream(), outgoing);
+                } else if (frame.uploadProgress != null) writeLegacyUpload(frame, outgoing);
+                else Wire.write(socket.getOutputStream(), outgoing);
                 if (savedLive && !imageSync && !frame.cancelled && !knownImages.contains(key))
                     Wire.write(socket.getOutputStream(), new Wire.Frame(Wire.HISTORY_IMAGE, frame.id, frame.data));
                 if (frame.kind == Wire.HISTORY_IMAGE || savedLive) rememberImage(key);
@@ -214,6 +216,7 @@ final class TlsLink implements Closeable {
             Wire.write(socket.getOutputStream(), new Wire.Frame(frame.saveImage ? Wire.SAVED_IMAGE_PART : Wire.IMAGE_PART,
                     frame.id, Arrays.copyOfRange(frame.data, offset, end)));
             offset = end;
+            frame.reportUploadProgress((int)Math.min(99, 100L * offset / frame.data.length));
         }
         if (offset > 0 && frame.deadlineNanos != 0 && !frame.expired()) {
             readyImage = null;
@@ -234,9 +237,27 @@ final class TlsLink implements Closeable {
             complete = left > 0;
             if (complete) budget = java.nio.ByteBuffer.allocate(4).putInt((int)Math.min(left, 10000)).array();
         }
+        if (complete && frame.uploadProgress != null) complete = frame.beginUploadCommit();
         if (offset > 0) Wire.write(socket.getOutputStream(),
                 new Wire.Frame(complete ? Wire.IMAGE_END : Wire.IMAGE_ABORT, frame.id, budget));
+        if (complete) frame.reportUploadProgress(100);
         return complete;
+    }
+
+    private void writeLegacyUpload(Wire.Frame frame, Wire.Frame outgoing) throws IOException {
+        java.io.OutputStream stream = socket.getOutputStream();
+        Wire.writeHeader(stream, outgoing);
+        int offset = 0;
+        while (offset < frame.data.length) {
+            int count = Math.min(Wire.PART_LIMIT, frame.data.length - offset);
+            if (frame.expired() || (count == frame.data.length - offset && !frame.beginUploadCommit()))
+                throw new IOException("Legacy image upload cancelled");
+            stream.write(frame.data, offset, count);
+            offset += count;
+            frame.reportUploadProgress((int)Math.min(99, 100L * offset / frame.data.length));
+        }
+        stream.flush();
+        frame.reportUploadProgress(100);
     }
 
     void acknowledge(byte[] id) {

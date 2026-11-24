@@ -42,8 +42,8 @@ final class ScreenshotBubble {
     private VirtualDisplay display;
     private ImageReader reader;
     private Object request;
-    private Runnable timeout;
-    private long deadline;
+    private Runnable captureTimeout;
+    private int uploadPercent;
     private int feedbackVersion;
     private long lastAuthorizationTap = -1000;
 
@@ -206,7 +206,11 @@ final class ScreenshotBubble {
     }
 
     private void tap() {
-        if (request != null || !isVisible()) return;
+        if (!isVisible()) return;
+        if (request != null) {
+            finish(request, null, false);
+            return;
+        }
         if (display == null) {
             long now = android.os.SystemClock.uptimeMillis();
             if (now - lastAuthorizationTap < 1000) return;
@@ -224,11 +228,12 @@ final class ScreenshotBubble {
         Object id = new Object();
         request = id;
         feedbackVersion++;
-        button.setText("发送中");
+        uploadPercent = -1;
+        progress(id, 0);
         button.setVisibility(View.INVISIBLE);
-        deadline = android.os.SystemClock.uptimeMillis() + 10000;
-        timeout = () -> finish(id, "发送失败", false);
-        main.postAtTime(timeout, deadline);
+        // Recover the hidden control if Android never supplies a frame.
+        captureTimeout = () -> finish(id, "截屏失败", false);
+        main.postDelayed(captureTimeout, 10000);
         // Give the compositor time to remove the overlay before attaching a fresh reader.
         main.postDelayed(() -> capture(id), 180);
     }
@@ -291,13 +296,16 @@ final class ScreenshotBubble {
         service.sendCapture(frame, id);
     }
 
-    long remainingMillis() { return deadline - android.os.SystemClock.uptimeMillis(); }
+    boolean isSending(Object id) { return request == id; }
 
-    boolean isSending(Object id) {
-        if (request != id) return false;
-        if (android.os.SystemClock.uptimeMillis() < deadline) return true;
-        finish(id, "发送失败", false);
-        return false;
+    void progress(Object id, int percent) {
+        if (request != id || button == null || percent <= uploadPercent) return;
+        uploadPercent = percent;
+        button.setText(percent == 100 ? "已发送 100% · 停止等待" : "发送中 " + percent + "% · 取消");
+    }
+
+    void sendFailed() {
+        if (request != null) sendFailed(request);
     }
 
     void delivered(Object id) {
@@ -309,12 +317,10 @@ final class ScreenshotBubble {
 
     private void finish(Object id, String message, boolean success) {
         if (request != id) return;
-        main.removeCallbacks(timeout);
-        timeout = null;
         request = null;
         releaseReader();
-        service.finishCapture(id, success);
-        feedback(message, success);
+        boolean committed = service.finishCapture(id, success);
+        feedback(message != null ? message : (committed ? "已停止等待" : "已取消"), success);
     }
 
     private void feedback(String message, boolean success) {
@@ -333,6 +339,10 @@ final class ScreenshotBubble {
     }
 
     private void releaseReader() {
+        if (captureTimeout != null) {
+            main.removeCallbacks(captureTimeout);
+            captureTimeout = null;
+        }
         if (reader == null) return;
         try {
             if (display != null) display.setSurface(null);
@@ -357,8 +367,7 @@ final class ScreenshotBubble {
 
     void close() {
         if (display != null || projection != null) stopProjection();
-        if (timeout != null) main.removeCallbacks(timeout);
-        timeout = null;
+        else releaseReader();
         if (request != null) service.finishCapture(request, false);
         request = null;
         if (button != null) {

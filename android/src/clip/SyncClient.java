@@ -70,14 +70,16 @@ final class SyncClient implements Closeable {
         }
     }
 
-    void cancelImage(Wire.Frame frame) {
+    boolean cancelImage(Wire.Frame frame) {
         synchronized (lock) {
-            frame.cancelled = true;
+            boolean committed = frame.cancelUpload();
             if (link != null) link.cancelWrite(frame);
-            if (!images.remove(frame)) return;
-            confirmations.remove(frame);
-            if (sentImage == frame) sentImage = null;
-            scheduleWrite();
+            if (images.remove(frame)) {
+                confirmations.remove(frame);
+                if (sentImage == frame) sentImage = null;
+                scheduleWrite();
+            }
+            return committed;
         }
     }
 

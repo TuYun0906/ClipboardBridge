@@ -72,6 +72,23 @@ final class Wire {
         final boolean saveImage;
         volatile boolean cancelled;
         long deadlineNanos;
+        java.util.function.IntConsumer uploadProgress;
+        private boolean uploadCommitted;
+
+        synchronized boolean beginUploadCommit() {
+            if (cancelled) return false;
+            uploadCommitted = true;
+            return true;
+        }
+
+        synchronized boolean cancelUpload() {
+            cancelled = true;
+            return uploadCommitted;
+        }
+
+        void reportUploadProgress(int percent) {
+            if (uploadProgress != null && !cancelled) uploadProgress.accept(percent);
+        }
 
         boolean expired() { return cancelled || (deadlineNanos != 0 && System.nanoTime() - deadlineNanos >= 0); }
 
@@ -99,6 +116,12 @@ final class Wire {
     }
 
     static void write(OutputStream target, Frame frame) throws IOException {
+        writeHeader(target, frame);
+        target.write(frame.data);
+        target.flush();
+    }
+
+    static void writeHeader(OutputStream target, Frame frame) throws IOException {
         validateLength(frame.kind, frame.data.length);
         if (frame.id.length != ID_SIZE) throw new IOException("Invalid message ID");
         int count = frame.data.length;
@@ -107,8 +130,6 @@ final class Wire {
         System.arraycopy(frame.id, 0, header, 1, ID_SIZE);
         for (int i = 0; i < 4; i++) header[1 + ID_SIZE + i] = (byte)(count >>> (24 - 8 * i));
         target.write(header);
-        target.write(frame.data);
-        target.flush();
     }
 
     private static void validateLength(int kind, int count) throws IOException {

@@ -63,7 +63,7 @@ public final class SyncService extends Service {
     private long lastImageSentAt;
     private ScreenshotBubble screenshot;
     private Object queuedCapture;
-    private Runnable cancelCapture;
+    private java.util.function.BooleanSupplier cancelCapture;
     private android.widget.Toast imageToast;
     private final ImageSentBanner imageBanner = new ImageSentBanner(this);
 
@@ -330,8 +330,11 @@ public final class SyncService extends Service {
                         screenshot.sendFailed(request);
                         return;
                     }
-                    frame.deadlineNanos = System.nanoTime() +
-                            java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(screenshot.remainingMillis());
+                    java.util.concurrent.atomic.AtomicInteger reported = new java.util.concurrent.atomic.AtomicInteger(0);
+                    frame.uploadProgress = percent -> {
+                        if (percent > reported.getAndAccumulate(percent, Math::max))
+                            main.post(() -> screenshot.progress(request, percent));
+                    };
                     Runnable delivered = () -> main.post(() -> {
                         if (destroyed || !screenshot.isSending(request)) return;
                         worker.post(() -> record(frame, true));
@@ -342,7 +345,7 @@ public final class SyncService extends Service {
                     if (currentHost != null) {
                         queuedCapture = request;
                         cancelCapture = () -> currentHost.cancelImage(frame);
-                        currentHost.submit(frame, delivered);
+                        currentHost.submit(frame, delivered, () -> main.post(() -> screenshot.sendFailed(request)));
                     } else if (currentClient != null) {
                         queuedCapture = request;
                         cancelCapture = () -> currentClient.cancelImage(frame);
@@ -359,11 +362,12 @@ public final class SyncService extends Service {
         }
     }
 
-    void finishCapture(Object request, boolean delivered) {
-        if (queuedCapture != request) return;
-        if (!delivered) cancelCapture.run();
+    boolean finishCapture(Object request, boolean delivered) {
+        if (queuedCapture != request) return false;
+        boolean committed = !delivered && cancelCapture.getAsBoolean();
         queuedCapture = null;
         cancelCapture = null;
+        return committed;
     }
 
     private void applySettings() {
@@ -371,6 +375,7 @@ public final class SyncService extends Service {
         if (screenshot.isVisible()) dismissImagePopup();
         boolean hostMode = prefs.getBoolean(Prefs.HOST, false);
         if (hostMode != hosting) {
+            screenshot.sendFailed();
             hosting = hostMode;
             if (client != null) client.close();
             client = null;
@@ -449,6 +454,7 @@ public final class SyncService extends Service {
         String address = prefs.getString(publicMode ? Prefs.WAN : Prefs.LAN, "").trim();
         String code = prefs.getString(Prefs.PAIR, "").trim();
         if (!address.equals(endpoint) || !code.equals(token) || publicMode != internet) {
+            screenshot.sendFailed();
             if (client != null) client.close();
             client = null;
             endpoint = address;

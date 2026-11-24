@@ -105,7 +105,37 @@ public final class AndroidHostCheck {
                 host.publish(frame(Wire.HISTORY_TEXT, 33, "same connection"));
                 check(slow.read(), Wire.HISTORY_TEXT, "same connection");
                 host.submit(frame(Wire.IMAGE, 34, "following image"));
-                check(slow.read(), Wire.IMAGE, "following image");
+                Wire.Frame following = slow.read();
+                check(following, Wire.IMAGE, "following image");
+                slow.acknowledge(following.id);
+
+                Wire.Frame stopped = new Wire.Frame(Wire.IMAGE, frame(Wire.IMAGE, 38, "id").id,
+                        new byte[4 * Wire.PART_LIMIT]);
+                stopped.uploadProgress = percent -> {
+                    if (percent != 25) throw new AssertionError("Expected progress of 25%, got " + percent);
+                    if (host.cancelImage(stopped)) throw new AssertionError("Partial screenshot was committed");
+                    host.publish(frame(Wire.HISTORY_TEXT, 39, "cancelled during upload"));
+                };
+                host.submit(stopped, () -> { throw new AssertionError("Cancelled screenshot confirmed"); });
+                check(slow.read(), Wire.HISTORY_TEXT, "cancelled during upload");
+
+                Wire.Frame full = new Wire.Frame(Wire.IMAGE, frame(Wire.IMAGE, 40, "id").id,
+                        new byte[4 * Wire.PART_LIMIT], true);
+                java.util.List<Integer> progress = new java.util.concurrent.CopyOnWriteArrayList<>();
+                java.util.concurrent.CountDownLatch fullyWritten = new java.util.concurrent.CountDownLatch(1);
+                full.uploadProgress = percent -> {
+                    progress.add(percent);
+                    if (percent == 100) fullyWritten.countDown();
+                };
+                java.util.concurrent.CountDownLatch confirmed = new java.util.concurrent.CountDownLatch(1);
+                host.submit(full, confirmed::countDown);
+                Wire.Frame upload = slow.read();
+                if (upload.kind != Wire.IMAGE || !upload.saveImage || !Arrays.equals(upload.data, full.data))
+                    throw new AssertionError("Untimed screenshot payload changed");
+                slow.acknowledge(upload.id);
+                if (!confirmed.await(3, TimeUnit.SECONDS) || !fullyWritten.await(3, TimeUnit.SECONDS) ||
+                        !progress.equals(Arrays.asList(25, 50, 75, 99, 100)))
+                    throw new AssertionError("Missing confirmation or progress: " + progress);
 
                 Wire.Frame part = frame(Wire.IMAGE_PART, 35, "late screenshot");
                 slow.send(part);
@@ -117,6 +147,23 @@ public final class AndroidHostCheck {
                 slow.send(new Wire.Frame(Wire.IMAGE_END, part.id, new byte[]{0, 0, 0, 1}));
                 slow.send(frame(Wire.HISTORY_TEXT, 37, "late commit discarded"));
                 check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "late commit discarded");
+            }
+            try (TlsLink target = TlsLink.connect("127.0.0.1", host.port(), pin, key, () -> new byte[0])) {
+                check(target.read(), Wire.HISTORY_TEXT, "host history");
+                check(target.read(), Wire.HISTORY_IMAGE, "known image");
+                Wire.Frame unconfirmed = frame(Wire.IMAGE, 41, "awaiting clipboard");
+                java.util.concurrent.CountDownLatch failed = new java.util.concurrent.CountDownLatch(1);
+                unconfirmed.uploadProgress = percent -> {};
+                host.submit(unconfirmed, () -> { throw new AssertionError("No ACK was sent"); }, failed::countDown);
+                check(target.read(), Wire.IMAGE, "awaiting clipboard");
+                try (TlsLink replacement = TlsLink.connect("127.0.0.1", host.port(), pin, key, () -> new byte[0])) {
+                    check(replacement.read(), Wire.HISTORY_TEXT, "host history");
+                    check(replacement.read(), Wire.HISTORY_IMAGE, "known image");
+                    target.close();
+                    if (!failed.await(2, TimeUnit.SECONDS)) throw new AssertionError("Disconnected delivery did not fail");
+                    host.submit(frame(Wire.TEXT, 42, "replacement still connected"));
+                    check(replacement.read(), Wire.TEXT, "replacement still connected");
+                }
             }
         }
     }

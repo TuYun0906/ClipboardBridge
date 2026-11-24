@@ -32,10 +32,11 @@ final class SyncHost implements Closeable {
 
     private static final class ImageDelivery {
         final Wire.Frame frame;
-        Runnable confirmation;
-        ImageDelivery(Wire.Frame frame, Runnable confirmation) {
+        Runnable confirmation, failure;
+        ImageDelivery(Wire.Frame frame, Runnable confirmation, Runnable failure) {
             this.frame = frame;
             this.confirmation = confirmation;
+            this.failure = failure;
         }
     }
 
@@ -64,15 +65,20 @@ final class SyncHost implements Closeable {
 
     void start() { startThread(this::accept, "clip-listen"); }
     int port() { return listener.getLocalPort(); }
-    void submit(Wire.Frame frame) { submit(frame, null, null); }
-    void submit(Wire.Frame frame, Runnable delivered) { submit(frame, null, delivered); }
+    void submit(Wire.Frame frame) { submit(frame, null, null, null); }
+    void submit(Wire.Frame frame, Runnable delivered) { submit(frame, null, delivered, null); }
+    void submit(Wire.Frame frame, Runnable delivered, Runnable failed) { submit(frame, null, delivered, failed); }
     synchronized void publish(Wire.Frame frame) { publish(frame, null); }
 
-    private synchronized void submit(Wire.Frame frame, Peer origin, Runnable delivered) {
+    private synchronized void submit(Wire.Frame frame, Peer origin, Runnable delivered, Runnable failed) {
         if (closed) return;
-        ImageDelivery image = frame.kind == Wire.IMAGE ? new ImageDelivery(frame, delivered) : null;
+        ImageDelivery image = frame.kind == Wire.IMAGE ? new ImageDelivery(frame, delivered, failed) : null;
         if (image == null) pending = origin == null ? frame : null;
-        else if (origin == null && connected == 0) waitingImages.add(image);
+        else if (origin == null && connected == 0) {
+            if (failed != null) failed.run();
+            else waitingImages.add(image);
+            return;
+        }
         for (Peer peer : peers) {
             if (peer == origin || peer.link == null) continue;
             if (image != null) peer.images.add(image);
@@ -81,8 +87,8 @@ final class SyncHost implements Closeable {
         }
     }
 
-    synchronized void cancelImage(Wire.Frame frame) {
-        frame.cancelled = true;
+    synchronized boolean cancelImage(Wire.Frame frame) {
+        boolean committed = frame.cancelUpload();
         waitingImages.removeIf(image -> image.frame == frame);
         for (Peer peer : peers) {
             if (peer.link != null) peer.link.cancelWrite(frame);
@@ -92,6 +98,7 @@ final class SyncHost implements Closeable {
                 schedule(peer);
             }
         }
+        return committed;
     }
 
     private synchronized void publish(Wire.Frame frame, Peer origin) {
@@ -139,6 +146,7 @@ final class SyncHost implements Closeable {
                         if (peer.sentImage != null && Arrays.equals(peer.sentImage.frame.id, frame.id)) {
                             delivered = peer.sentImage.confirmation;
                             peer.sentImage.confirmation = null;
+                            peer.sentImage.failure = null;
                             peer.images.remove();
                             peer.sentImage = null;
                             schedule(peer);
@@ -166,6 +174,12 @@ final class SyncHost implements Closeable {
                 if (peer.link != null && --connected == 0 && !closed) status.accept(false);
                 peer.link = null;
                 peer.history.clear();
+                for (ImageDelivery image : peer.images) {
+                    if (image.failure != null && peers.stream().noneMatch(other -> other.images.contains(image))) {
+                        image.failure.run();
+                        image.failure = null;
+                    }
+                }
                 peer.images.clear();
             }
         }
@@ -183,7 +197,7 @@ final class SyncHost implements Closeable {
                 oldest.remove();
             }
             frame.deadlineNanos = 0;
-            submit(frame, peer, null);
+            submit(frame, peer, null, null);
         }
     }
 

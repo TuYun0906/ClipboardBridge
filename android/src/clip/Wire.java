@@ -9,7 +9,8 @@ final class Wire {
     static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4, HISTORY_TEXT = 5, HISTORY_IMAGE = 6, DELETE = 7;
     static final int IMAGE_INVENTORY = 8, SAVED_IMAGE = 9;
     static final int IMAGE_PART = 10, SAVED_IMAGE_PART = 11, IMAGE_END = 12, IMAGE_ABORT = 13;
-    static final int IMAGE_PREPARE = 14, IMAGE_READY = 15;
+    static final int IMAGE_PREPARE = 14, IMAGE_READY = 15, IMAGE_PROGRESS = 16;
+    static final int UPLOAD_PROGRESS_UNAVAILABLE = -1;
     static final int PART_LIMIT = 32 * 1024;
     private static final byte[] PART_VERSION = {67, 67, 73, 49};
     private static final byte[] SYNC_VERSION = {67, 66, 73, 77, 71, 2, 117, 57};
@@ -17,6 +18,9 @@ final class Wire {
     static void offerImageSync(byte[] id) {
         System.arraycopy(SYNC_VERSION, 0, id, 0, SYNC_VERSION.length);
         System.arraycopy(PART_VERSION, 0, id, 8, PART_VERSION.length);
+        id[12] = 'R';
+        id[13] = 'C';
+        id[14] = 'V';
     }
 
     static boolean offersImageParts(byte[] id) {
@@ -27,6 +31,16 @@ final class Wire {
     static boolean offersImageSync(byte[] id) {
         for (int i = 0; i < SYNC_VERSION.length; i++) if (id[i] != SYNC_VERSION[i]) return false;
         return true;
+    }
+
+    static boolean offersImageProgress(byte[] id) {
+        return id[12] == 'R' && id[13] == 'C' && id[14] == 'V';
+    }
+
+    static byte[] acceptImageProgress(byte[] id) {
+        byte[] reply = id.clone();
+        reply[15] ^= 4;
+        return reply;
     }
 
     static byte[] acceptImageSync(byte[] id) { return acceptImageSync(id, false); }
@@ -73,6 +87,7 @@ final class Wire {
         volatile boolean cancelled;
         long deadlineNanos;
         java.util.function.IntConsumer uploadProgress;
+        volatile boolean awaitingUploadUi;
         private boolean uploadCommitted;
 
         synchronized boolean beginUploadCommit() {
@@ -139,6 +154,7 @@ final class Wire {
             case IMAGE_PART:
             case SAVED_IMAGE_PART: valid = count > 0 && count <= PART_LIMIT; break;
             case IMAGE_END: valid = count == 0 || count == 4; break;
+            case IMAGE_PROGRESS: valid = count == 4; break;
             case IMAGE_ABORT:
             case IMAGE_PREPARE:
             case IMAGE_READY:

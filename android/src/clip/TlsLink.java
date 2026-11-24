@@ -23,7 +23,9 @@ final class TlsLink implements Closeable {
     private final Object sendLock = new Object();
     private final java.util.Set<String> knownImages = new java.util.LinkedHashSet<>();
     private volatile boolean imageSync;
-    private boolean imageParts;
+    private boolean imageParts, imageProgress;
+    private volatile boolean closed;
+    private volatile int acknowledgedImageBytes;
     private Wire.Frame firstPart;
     private volatile byte[] readyImage;
     private long preparedAt;
@@ -64,7 +66,8 @@ final class TlsLink implements Closeable {
             link.send(new Wire.Frame(Wire.AUTH, id, key));
             Wire.Frame ack = link.read();
             if (ack == null || ack.kind != Wire.ACK) throw new IOException("Pairing rejected");
-            link.imageParts = inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id, true));
+            link.imageProgress = inventory != null && Arrays.equals(ack.id, Wire.acceptImageProgress(id));
+            link.imageParts = link.imageProgress || (inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id, true)));
             if (link.imageParts || (inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id)))) {
                 link.readInventory();
                 link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, id, inventory.get()));
@@ -107,7 +110,11 @@ final class TlsLink implements Closeable {
                 throw new IOException("Pairing rejected");
             boolean upgraded = inventory != null && Wire.offersImageSync(hello.id);
             link.imageParts = upgraded && Wire.offersImageParts(hello.id);
-            link.send(new Wire.Frame(Wire.ACK, upgraded ? Wire.acceptImageSync(hello.id, link.imageParts) : hello.id, new byte[0]));
+            link.imageProgress = link.imageParts && Wire.offersImageProgress(hello.id);
+            byte[] reply = hello.id;
+            if (link.imageProgress) reply = Wire.acceptImageProgress(hello.id);
+            else if (upgraded) reply = Wire.acceptImageSync(hello.id, link.imageParts);
+            link.send(new Wire.Frame(Wire.ACK, reply, new byte[0]));
             if (upgraded) {
                 link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, hello.id, inventory.get()));
                 link.readInventory();
@@ -135,6 +142,18 @@ final class TlsLink implements Closeable {
             if (frame == null) return null;
             if (imageSync && frame.kind == Wire.SAVED_IMAGE)
                 return new Wire.Frame(Wire.IMAGE, frame.id, frame.data, true);
+            if (imageProgress && frame.kind == Wire.IMAGE_PROGRESS) {
+                Wire.Frame upload = writingFrame;
+                if (upload != null && upload.uploadProgress != null && Arrays.equals(upload.id, frame.id)) {
+                    int received = java.nio.ByteBuffer.wrap(frame.data).getInt();
+                    if (received > upload.data.length || received <= 0) throw new IOException("Invalid image progress");
+                    if (received > acknowledgedImageBytes) {
+                        upload.reportUploadProgress((int)(100L * received / upload.data.length));
+                        acknowledgedImageBytes = received;
+                    }
+                }
+                continue;
+            }
             if (!imageParts || frame.kind < Wire.IMAGE_PART || frame.kind > Wire.IMAGE_READY) return frame;
             if (frame.kind == Wire.IMAGE_READY) {
                 readyImage = frame.id;
@@ -149,6 +168,9 @@ final class TlsLink implements Closeable {
                         imageBuffer.size() + frame.data.length > Wire.IMAGE_LIMIT)
                     throw new IOException("Invalid image part");
                 imageBuffer.write(frame.data);
+                if (imageProgress)
+                    enqueueControl(new Wire.Frame(Wire.IMAGE_PROGRESS, frame.id,
+                            java.nio.ByteBuffer.allocate(4).putInt(imageBuffer.size()).array()));
                 continue;
             }
             if (firstPart == null || !Arrays.equals(frame.id, firstPart.id))
@@ -186,6 +208,7 @@ final class TlsLink implements Closeable {
     void send(Wire.Frame frame) throws IOException {
         synchronized (sendLock) {
             flushAcknowledgements();
+            acknowledgedImageBytes = 0;
             writingFrame = frame;
             try {
                 if (frame.expired()) return;
@@ -209,25 +232,29 @@ final class TlsLink implements Closeable {
 
     private boolean writeImageParts(Wire.Frame frame) throws IOException {
         int offset = 0;
+        boolean confirmBytes = imageProgress && frame.uploadProgress != null && frame.deadlineNanos == 0;
+        int partSize = confirmBytes ? Math.min(Wire.PART_LIMIT, Math.max(1024, (frame.data.length + 3) / 4))
+                : Wire.PART_LIMIT;
+        if (!confirmBytes) frame.reportUploadProgress(Wire.UPLOAD_PROGRESS_UNAVAILABLE);
         while (offset < frame.data.length && !frame.expired()) {
             flushAcknowledgements();
             if (frame.expired()) break;
-            int end = Math.min(offset + Wire.PART_LIMIT, frame.data.length);
+            int end = Math.min(offset + partSize, frame.data.length);
             Wire.write(socket.getOutputStream(), new Wire.Frame(frame.saveImage ? Wire.SAVED_IMAGE_PART : Wire.IMAGE_PART,
                     frame.id, Arrays.copyOfRange(frame.data, offset, end)));
             offset = end;
-            frame.reportUploadProgress((int)Math.min(99, 100L * offset / frame.data.length));
+        }
+        if (confirmBytes) {
+            // The cancel control must switch to "stop waiting" before we commit to the peer.
+            while (!frame.expired() && !closed && (acknowledgedImageBytes < offset || frame.awaitingUploadUi))
+                waitForImageReceipt();
+            if (closed) throw new IOException("Image connection closed");
         }
         if (offset > 0 && frame.deadlineNanos != 0 && !frame.expired()) {
             readyImage = null;
             Wire.write(socket.getOutputStream(), new Wire.Frame(Wire.IMAGE_PREPARE, frame.id, new byte[0]));
-            while (!frame.expired() && !Arrays.equals(readyImage, frame.id)) {
-                try { sendLock.wait(50); }
-                catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Image transfer interrupted", interrupted);
-                }
-            }
+            while (!frame.expired() && !closed && !Arrays.equals(readyImage, frame.id)) waitForImageReceipt();
+            if (closed) throw new IOException("Image connection closed");
             readyImage = null;
         }
         byte[] budget = new byte[0];
@@ -240,11 +267,20 @@ final class TlsLink implements Closeable {
         if (complete && frame.uploadProgress != null) complete = frame.beginUploadCommit();
         if (offset > 0) Wire.write(socket.getOutputStream(),
                 new Wire.Frame(complete ? Wire.IMAGE_END : Wire.IMAGE_ABORT, frame.id, budget));
-        if (complete) frame.reportUploadProgress(100);
+        if (complete && !confirmBytes) frame.reportUploadProgress(100);
         return complete;
     }
 
+    private void waitForImageReceipt() throws IOException {
+        try { sendLock.wait(30); }
+        catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Image transfer interrupted", interrupted);
+        }
+    }
+
     private void writeLegacyUpload(Wire.Frame frame, Wire.Frame outgoing) throws IOException {
+        frame.reportUploadProgress(Wire.UPLOAD_PROGRESS_UNAVAILABLE);
         java.io.OutputStream stream = socket.getOutputStream();
         Wire.writeHeader(stream, outgoing);
         int offset = 0;
@@ -254,7 +290,6 @@ final class TlsLink implements Closeable {
                 throw new IOException("Legacy image upload cancelled");
             stream.write(frame.data, offset, count);
             offset += count;
-            frame.reportUploadProgress((int)Math.min(99, 100L * offset / frame.data.length));
         }
         stream.flush();
         frame.reportUploadProgress(100);
@@ -321,6 +356,7 @@ final class TlsLink implements Closeable {
     private static String imageKey(byte[] id) { return java.util.Base64.getEncoder().encodeToString(id); }
 
     @Override public void close() throws IOException {
+        closed = true;
         socket.close();
     }
 

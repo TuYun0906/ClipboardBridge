@@ -23,11 +23,12 @@ public final class AndroidHostCheck {
         byte[] pin = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(store.getCertificate(store.aliases().nextElement()).getEncoded());
         LinkedBlockingQueue<Wire.Frame> received = new LinkedBlockingQueue<>();
+        java.util.concurrent.CountDownLatch initialPeersLeft = new java.util.concurrent.CountDownLatch(1);
         try (SyncHost host = new SyncHost(tls, key, 0, (frame, relay) -> {
             received.add(frame);
             if (frame.kind == Wire.DELETE || frame.kind == Wire.HISTORY_TEXT && frame.id[0] != 7)
                 relay.accept(frame);
-        }, connected -> {}, sender -> {
+        }, connected -> { if (!connected) initialPeersLeft.countDown(); }, sender -> {
             sender.send(frame(Wire.HISTORY_TEXT, 8, "host history"));
             sender.send(frame(Wire.HISTORY_IMAGE, 9, "known image"));
         })) {
@@ -56,7 +57,7 @@ public final class AndroidHostCheck {
                     Wire.Frame image = frame(Wire.IMAGE, i, "host image " + i);
                     if (i == 22) Wire.markCompressed(image.id, 70, 100);
                     if (i == 21) image = new Wire.Frame(image.kind, image.id, image.data, true);
-                    if (i == 23) image.deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    if (i == 23) image.uploadProgress = percent -> {};
                     host.submit(image, i == 23 ? delivered::countDown : null);
                     if (i == 21) host.publish(new Wire.Frame(Wire.HISTORY_IMAGE, image.id, image.data));
                 }
@@ -79,6 +80,11 @@ public final class AndroidHostCheck {
                 check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "test done");
                 host.publish(frame(Wire.HISTORY_TEXT, 7, "test done"));
                 check(peer.read(), Wire.HISTORY_TEXT, "test done");
+            }
+            if (!initialPeersLeft.await(3, TimeUnit.SECONDS)) throw new AssertionError("Initial peers did not leave");
+            try (TlsLink peer = TlsLink.connect("127.0.0.1", host.port(), pin, key)) {
+                check(peer.read(), Wire.HISTORY_TEXT, "host history");
+                check(peer.read(), Wire.HISTORY_IMAGE, "known image");
                 java.util.concurrent.atomic.AtomicBoolean expiredAck = new java.util.concurrent.atomic.AtomicBoolean();
                 Wire.Frame expired = frame(Wire.IMAGE, 26, "cancelled image");
                 host.submit(expired, () -> expiredAck.set(true));
@@ -123,18 +129,33 @@ public final class AndroidHostCheck {
                         new byte[4 * Wire.PART_LIMIT], true);
                 java.util.List<Integer> progress = new java.util.concurrent.CopyOnWriteArrayList<>();
                 java.util.concurrent.CountDownLatch fullyWritten = new java.util.concurrent.CountDownLatch(1);
+                full.awaitingUploadUi = true;
                 full.uploadProgress = percent -> {
                     progress.add(percent);
                     if (percent == 100) fullyWritten.countDown();
                 };
                 java.util.concurrent.CountDownLatch confirmed = new java.util.concurrent.CountDownLatch(1);
                 host.submit(full, confirmed::countDown);
-                Wire.Frame upload = slow.read();
+                // The image fits in the sender's TCP buffer. The receiver has not read any image data.
+                if (fullyWritten.await(400, TimeUnit.MILLISECONDS) || !progress.isEmpty())
+                    throw new AssertionError("Displayed progress before the peer read any bytes: " + progress);
+                java.util.concurrent.FutureTask<Wire.Frame> readImage =
+                        new java.util.concurrent.FutureTask<>(slow::read);
+                Thread receiving = new Thread(readImage, "test-image-receiver");
+                receiving.setDaemon(true);
+                receiving.start();
+                if (!fullyWritten.await(3, TimeUnit.SECONDS)) throw new AssertionError("Peer did not read the image");
+                try {
+                    readImage.get(150, TimeUnit.MILLISECONDS);
+                    throw new AssertionError("Image committed before the UI showed 100%");
+                } catch (java.util.concurrent.TimeoutException expected) { }
+                full.awaitingUploadUi = false;
+                Wire.Frame upload = readImage.get(3, TimeUnit.SECONDS);
                 if (upload.kind != Wire.IMAGE || !upload.saveImage || !Arrays.equals(upload.data, full.data))
                     throw new AssertionError("Untimed screenshot payload changed");
                 slow.acknowledge(upload.id);
                 if (!confirmed.await(3, TimeUnit.SECONDS) || !fullyWritten.await(3, TimeUnit.SECONDS) ||
-                        !progress.equals(Arrays.asList(25, 50, 75, 99, 100)))
+                        !progress.equals(Arrays.asList(25, 50, 75, 100)))
                     throw new AssertionError("Missing confirmation or progress: " + progress);
 
                 Wire.Frame part = frame(Wire.IMAGE_PART, 35, "late screenshot");

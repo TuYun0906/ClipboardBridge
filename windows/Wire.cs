@@ -31,7 +31,7 @@ internal static class Wire
     internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4, HistoryText = 5, HistoryImage = 6, Delete = 7;
     internal const byte ImageInventory = 8, SavedImage = 9;
     internal const byte ImagePart = 10, SavedImagePart = 11, ImageEnd = 12, ImageAbort = 13;
-    internal const byte ImagePrepare = 14, ImageReady = 15;
+    internal const byte ImagePrepare = 14, ImageReady = 15, ImageProgress = 16;
     private const int PartLimit = 32 * 1024;
     private static readonly byte[] PartVersion = {67, 67, 73, 49};
     private static readonly byte[] SyncVersion = {67, 66, 73, 77, 71, 2, 117, 57};
@@ -40,6 +40,9 @@ internal static class Wire
     {
         Array.Copy(SyncVersion, id, SyncVersion.Length);
         Array.Copy(PartVersion, 0, id, 8, PartVersion.Length);
+        id[12] = (byte)'R';
+        id[13] = (byte)'C';
+        id[14] = (byte)'V';
     }
 
     internal static bool OffersImageParts(byte[] id)
@@ -52,6 +55,18 @@ internal static class Wire
     {
         for (int i = 0; i < SyncVersion.Length; i++) if (id[i] != SyncVersion[i]) return false;
         return true;
+    }
+
+    internal static bool OffersImageProgress(byte[] id)
+    {
+        return id[12] == 'R' && id[13] == 'C' && id[14] == 'V';
+    }
+
+    internal static byte[] AcceptImageProgress(byte[] id)
+    {
+        var reply = (byte[])id.Clone();
+        reply[15] ^= 4;
+        return reply;
     }
 
     internal static byte[] AcceptImageSync(byte[] id, bool parts = false)
@@ -138,6 +153,7 @@ internal static class Wire
             case ImagePart:
             case SavedImagePart: valid = count > 0 && count <= PartLimit; break;
             case ImageEnd: valid = count == 0 || count == 4; break;
+            case ImageProgress: valid = count == 4; break;
             case ImageAbort:
             case ImagePrepare:
             case ImageReady:

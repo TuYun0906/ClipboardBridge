@@ -44,6 +44,7 @@ final class ScreenshotBubble {
     private Object request;
     private Runnable captureTimeout;
     private int uploadPercent;
+    private boolean showUploadPercent;
     private int feedbackVersion;
     private long lastAuthorizationTap = -1000;
 
@@ -229,6 +230,7 @@ final class ScreenshotBubble {
         request = id;
         feedbackVersion++;
         uploadPercent = -1;
+        showUploadPercent = true;
         progress(id, 0);
         button.setVisibility(View.INVISIBLE);
         // Recover the hidden control if Android never supplies a frame.
@@ -299,9 +301,22 @@ final class ScreenshotBubble {
     boolean isSending(Object id) { return request == id; }
 
     void progress(Object id, int percent) {
-        if (request != id || button == null || percent <= uploadPercent) return;
+        if (request != id || button == null) return;
+        if (percent == Wire.UPLOAD_PROGRESS_UNAVAILABLE) {
+            if (uploadPercent == 0) {
+                showUploadPercent = false;
+                button.setText("发送中 · 取消");
+            }
+            return;
+        }
+        if (percent <= uploadPercent) return;
         uploadPercent = percent;
-        button.setText(percent == 100 ? "已发送 100% · 停止等待" : "发送中 " + percent + "% · 取消");
+        if (percent == 100) {
+            button.setText(showUploadPercent ? "对端已收齐 100% · 停止等待" : "等待对端确认 · 停止等待");
+        } else {
+            showUploadPercent = true;
+            button.setText("发送中 " + percent + "% · 取消");
+        }
     }
 
     void sendFailed() {

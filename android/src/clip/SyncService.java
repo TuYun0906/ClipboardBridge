@@ -331,9 +331,14 @@ public final class SyncService extends Service {
                         return;
                     }
                     java.util.concurrent.atomic.AtomicInteger reported = new java.util.concurrent.atomic.AtomicInteger(0);
+                    frame.awaitingUploadUi = true;
                     frame.uploadProgress = percent -> {
-                        if (percent > reported.getAndAccumulate(percent, Math::max))
-                            main.post(() -> screenshot.progress(request, percent));
+                        if (percent == Wire.UPLOAD_PROGRESS_UNAVAILABLE ||
+                                percent > reported.getAndAccumulate(percent, Math::max))
+                            main.post(() -> {
+                                screenshot.progress(request, percent);
+                                if (percent == 100) frame.awaitingUploadUi = false;
+                            });
                     };
                     Runnable delivered = () -> main.post(() -> {
                         if (destroyed || !screenshot.isSending(request)) return;

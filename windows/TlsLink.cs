@@ -15,7 +15,7 @@ internal sealed class TlsLink : IDisposable
     private readonly object sendLock = new object();
     private readonly HashSet<string> knownImages = new HashSet<string>();
     private bool imageSync;
-    private bool imageParts;
+    private bool imageParts, imageProgress;
     private Frame firstPart;
     private MemoryStream imageBuffer;
     private long? preparedAt;
@@ -46,7 +46,11 @@ internal sealed class TlsLink : IDisposable
                     throw new AuthenticationException("Pairing key mismatch");
                 bool upgraded = inventory != null && Wire.OffersImageSync(hello.Id);
                 link.imageParts = upgraded && Wire.OffersImageParts(hello.Id);
-                link.Send(new Frame(Wire.Ack, upgraded ? Wire.AcceptImageSync(hello.Id, link.imageParts) : hello.Id, new byte[0]));
+                link.imageProgress = link.imageParts && Wire.OffersImageProgress(hello.Id);
+                byte[] reply = hello.Id;
+                if (link.imageProgress) reply = Wire.AcceptImageProgress(hello.Id);
+                else if (upgraded) reply = Wire.AcceptImageSync(hello.Id, link.imageParts);
+                link.Send(new Frame(Wire.Ack, reply, new byte[0]));
                 if (upgraded)
                 {
                     link.Send(new Frame(Wire.ImageInventory, hello.Id, inventory()));
@@ -98,7 +102,9 @@ internal sealed class TlsLink : IDisposable
             link.Send(new Frame(Wire.Auth, id, key));
             Frame ack = link.Read();
             if (ack == null || ack.Kind != Wire.Ack) throw new AuthenticationException("Pairing rejected");
-            link.imageParts = inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id, true));
+            link.imageProgress = inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageProgress(id));
+            link.imageParts = link.imageProgress ||
+                (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id, true)));
             if (link.imageParts || (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id))))
             {
                 link.ReadInventory();
@@ -136,6 +142,12 @@ internal sealed class TlsLink : IDisposable
                     imageBuffer.Length + frame.Data.Length > Wire.ImageLimit)
                     throw new IOException("Invalid image part");
                 imageBuffer.Write(frame.Data, 0, frame.Data.Length);
+                if (imageProgress)
+                {
+                    int count = (int)imageBuffer.Length;
+                    EnqueueControl(new Frame(Wire.ImageProgress, frame.Id,
+                        new byte[] { (byte)(count >> 24), (byte)(count >> 16), (byte)(count >> 8), (byte)count }));
+                }
                 continue;
             }
             if (firstPart == null || !frame.Id.SequenceEqual(firstPart.Id))

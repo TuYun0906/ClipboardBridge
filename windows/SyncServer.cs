@@ -165,7 +165,8 @@ internal sealed class SyncServer : ISyncConnection
                     else if (frame.Kind >= Wire.HistoryText && frame.Kind <= Wire.Delete) receive(frame, relay);
                     else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
                     {
-                        ApplyClipboard(frame, peer, relay);
+                        try { ApplyClipboard(frame, peer, relay); }
+                        catch (ExpiredImageException) { continue; }
                         link.Acknowledge(frame.Id);
                     }
                     else throw new IOException("Unexpected message");
@@ -201,6 +202,7 @@ internal sealed class SyncServer : ISyncConnection
             applied.Add(id);
             appliedOrder.Enqueue(id);
             if (appliedOrder.Count > 128) applied.Remove(appliedOrder.Dequeue());
+            frame.ReceiveDeadline = null;
             Submit(frame, peer);
         }
     }

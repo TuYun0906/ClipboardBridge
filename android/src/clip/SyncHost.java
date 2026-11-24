@@ -152,7 +152,8 @@ final class SyncHost implements Closeable {
                 } else if (frame.kind >= Wire.HISTORY_TEXT && frame.kind <= Wire.DELETE) {
                     receiver.apply(frame, change -> publish(change, change.kind == Wire.DELETE ? null : peer));
                 } else if (frame.kind == Wire.TEXT || frame.kind == Wire.IMAGE) {
-                    applyClipboard(frame, peer);
+                    try { applyClipboard(frame, peer); }
+                    catch (Wire.ExpiredImage expired) { continue; }
                     link.acknowledge(frame.id);
                 } else throw new IOException("Unexpected message");
             }
@@ -181,6 +182,7 @@ final class SyncHost implements Closeable {
                 oldest.next();
                 oldest.remove();
             }
+            frame.deadlineNanos = 0;
             submit(frame, peer, null);
         }
     }

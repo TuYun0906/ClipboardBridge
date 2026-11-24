@@ -1,12 +1,21 @@
 using System;
 using System.IO;
 
+internal sealed class ExpiredImageException : IOException { }
+
 internal sealed class Frame
 {
     internal readonly byte Kind;
     internal readonly byte[] Id;
     internal readonly byte[] Data;
     internal readonly bool SaveImage;
+    internal long? ReceiveDeadline;
+
+    internal void CheckDeadline()
+    {
+        if (ReceiveDeadline.HasValue && System.Diagnostics.Stopwatch.GetTimestamp() >= ReceiveDeadline.Value)
+            throw new ExpiredImageException();
+    }
 
     internal Frame(byte kind, byte[] id, byte[] data, bool saveImage = false)
     {
@@ -21,9 +30,23 @@ internal static class Wire
 {
     internal const byte Auth = 1, Text = 2, Image = 3, Ack = 4, HistoryText = 5, HistoryImage = 6, Delete = 7;
     internal const byte ImageInventory = 8, SavedImage = 9;
+    internal const byte ImagePart = 10, SavedImagePart = 11, ImageEnd = 12, ImageAbort = 13;
+    internal const byte ImagePrepare = 14, ImageReady = 15;
+    private const int PartLimit = 32 * 1024;
+    private static readonly byte[] PartVersion = {67, 67, 73, 49};
     private static readonly byte[] SyncVersion = {67, 66, 73, 77, 71, 2, 117, 57};
 
-    internal static void OfferImageSync(byte[] id) { Array.Copy(SyncVersion, id, SyncVersion.Length); }
+    internal static void OfferImageSync(byte[] id)
+    {
+        Array.Copy(SyncVersion, id, SyncVersion.Length);
+        Array.Copy(PartVersion, 0, id, 8, PartVersion.Length);
+    }
+
+    internal static bool OffersImageParts(byte[] id)
+    {
+        for (int i = 0; i < PartVersion.Length; i++) if (id[8 + i] != PartVersion[i]) return false;
+        return true;
+    }
 
     internal static bool OffersImageSync(byte[] id)
     {
@@ -31,10 +54,10 @@ internal static class Wire
         return true;
     }
 
-    internal static byte[] AcceptImageSync(byte[] id)
+    internal static byte[] AcceptImageSync(byte[] id, bool parts = false)
     {
         var reply = (byte[])id.Clone();
-        reply[15] ^= 1;
+        reply[15] ^= (byte)(parts ? 2 : 1);
         return reply;
     }
 
@@ -112,6 +135,12 @@ internal static class Wire
         switch (kind)
         {
             case Auth: valid = count == KeySize; break;
+            case ImagePart:
+            case SavedImagePart: valid = count > 0 && count <= PartLimit; break;
+            case ImageEnd: valid = count == 0 || count == 4; break;
+            case ImageAbort:
+            case ImagePrepare:
+            case ImageReady:
             case Delete:
             case Ack: valid = count == 0; break;
             case HistoryText:

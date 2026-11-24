@@ -291,6 +291,8 @@ final class ScreenshotBubble {
         service.sendCapture(frame, id);
     }
 
+    long remainingMillis() { return deadline - android.os.SystemClock.uptimeMillis(); }
+
     boolean isSending(Object id) {
         if (request != id) return false;
         if (android.os.SystemClock.uptimeMillis() < deadline) return true;

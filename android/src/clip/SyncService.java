@@ -330,6 +330,8 @@ public final class SyncService extends Service {
                         screenshot.sendFailed(request);
                         return;
                     }
+                    frame.deadlineNanos = System.nanoTime() +
+                            java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(screenshot.remainingMillis());
                     Runnable delivered = () -> main.post(() -> {
                         if (destroyed || !screenshot.isSending(request)) return;
                         worker.post(() -> record(frame, true));

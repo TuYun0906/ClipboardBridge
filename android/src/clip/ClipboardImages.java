@@ -28,6 +28,17 @@ public final class ClipboardImages extends ContentProvider {
             Files.deleteIfExists(file.toPath());
             throw error;
         }
+        return new Uri.Builder().scheme("content").authority(context.getPackageName() + ".images")
+                .appendPath(file.getName()).build();
+    }
+
+    static void finish(Context context, Uri uri, boolean applied) {
+        File dir = directory(context);
+        File file = new File(dir, uri.getLastPathSegment());
+        if (!applied) {
+            file.delete();
+            return;
+        }
         File[] files = dir.listFiles();
         if (files != null) {
             Arrays.sort(files, Comparator.comparingLong(File::lastModified).reversed());
@@ -35,8 +46,6 @@ public final class ClipboardImages extends ContentProvider {
                 if (!files[i].equals(file)) files[i].delete();
             }
         }
-        return new Uri.Builder().scheme("content").authority(context.getPackageName() + ".images")
-                .appendPath(file.getName()).build();
     }
 
     @Override public boolean onCreate() { return true; }

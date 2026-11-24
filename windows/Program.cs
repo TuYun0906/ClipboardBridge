@@ -319,7 +319,11 @@ internal sealed class Program : IDisposable
         {
             try
             {
-                app.Dispatcher.Invoke(new Action(() => Clipboard.SetDataObject(value, false)));
+                app.Dispatcher.Invoke(new Action(() =>
+                {
+                    frame.CheckDeadline();
+                    Clipboard.SetDataObject(value, false);
+                }));
                 if (frame.Kind == Wire.Text) Record(frame, false, relay);
                 else if (frame.SaveImage) Record(frame, false, relay == null ? (Action<Frame>)null : change =>
                 {

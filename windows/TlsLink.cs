@@ -15,6 +15,10 @@ internal sealed class TlsLink : IDisposable
     private readonly object sendLock = new object();
     private readonly HashSet<string> knownImages = new HashSet<string>();
     private bool imageSync;
+    private bool imageParts;
+    private Frame firstPart;
+    private MemoryStream imageBuffer;
+    private long? preparedAt;
     private readonly Queue<Frame> acknowledgements = new Queue<Frame>();
     private bool ackWriterScheduled;
 
@@ -41,7 +45,8 @@ internal sealed class TlsLink : IDisposable
                 if (hello == null || hello.Kind != Wire.Auth || !EqualKey(key, hello.Data))
                     throw new AuthenticationException("Pairing key mismatch");
                 bool upgraded = inventory != null && Wire.OffersImageSync(hello.Id);
-                link.Send(new Frame(Wire.Ack, upgraded ? Wire.AcceptImageSync(hello.Id) : hello.Id, new byte[0]));
+                link.imageParts = upgraded && Wire.OffersImageParts(hello.Id);
+                link.Send(new Frame(Wire.Ack, upgraded ? Wire.AcceptImageSync(hello.Id, link.imageParts) : hello.Id, new byte[0]));
                 if (upgraded)
                 {
                     link.Send(new Frame(Wire.ImageInventory, hello.Id, inventory()));
@@ -93,7 +98,8 @@ internal sealed class TlsLink : IDisposable
             link.Send(new Frame(Wire.Auth, id, key));
             Frame ack = link.Read();
             if (ack == null || ack.Kind != Wire.Ack) throw new AuthenticationException("Pairing rejected");
-            if (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id)))
+            link.imageParts = inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id, true));
+            if (link.imageParts || (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id))))
             {
                 link.ReadInventory();
                 link.Send(new Frame(Wire.ImageInventory, id, inventory()));
@@ -112,9 +118,61 @@ internal sealed class TlsLink : IDisposable
 
     internal Frame Read()
     {
-        var frame = Wire.Read(stream);
-        return imageSync && frame != null && frame.Kind == Wire.SavedImage
-            ? new Frame(Wire.Image, frame.Id, frame.Data, true) : frame;
+        for (;;)
+        {
+            var frame = Wire.Read(stream);
+            if (frame == null) return null;
+            if (imageSync && frame.Kind == Wire.SavedImage)
+                return new Frame(Wire.Image, frame.Id, frame.Data, true);
+            if (!imageParts || frame.Kind < Wire.ImagePart || frame.Kind > Wire.ImageReady) return frame;
+            if (frame.Kind == Wire.ImagePart || frame.Kind == Wire.SavedImagePart)
+            {
+                if (firstPart == null)
+                {
+                    firstPart = frame;
+                    imageBuffer = new MemoryStream();
+                }
+                if (preparedAt.HasValue || frame.Kind != firstPart.Kind || !frame.Id.SequenceEqual(firstPart.Id) ||
+                    imageBuffer.Length + frame.Data.Length > Wire.ImageLimit)
+                    throw new IOException("Invalid image part");
+                imageBuffer.Write(frame.Data, 0, frame.Data.Length);
+                continue;
+            }
+            if (firstPart == null || !frame.Id.SequenceEqual(firstPart.Id))
+                throw new IOException("Unexpected image completion");
+            if (frame.Kind == Wire.ImagePrepare)
+            {
+                if (preparedAt.HasValue) throw new IOException("Duplicate image preparation");
+                preparedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+                EnqueueControl(new Frame(Wire.ImageReady, frame.Id, new byte[0]));
+                continue;
+            }
+            Frame completed = frame.Kind == Wire.ImageEnd && CanCommit(frame)
+                ? new Frame(Wire.Image, frame.Id, imageBuffer.ToArray(), firstPart.Kind == Wire.SavedImagePart) : null;
+            if (completed != null && preparedAt.HasValue)
+                completed.ReceiveDeadline = preparedAt.Value +
+                    (long)CommitBudget(frame) * System.Diagnostics.Stopwatch.Frequency / 1000;
+            firstPart = null;
+            preparedAt = null;
+            imageBuffer.Dispose();
+            imageBuffer = null;
+            if (completed != null) return completed;
+        }
+    }
+
+    private bool CanCommit(Frame frame)
+    {
+        if (frame.Data.Length == 0 && !preparedAt.HasValue) return true;
+        if (frame.Data.Length != 4 || !preparedAt.HasValue) throw new IOException("Invalid timed image commit");
+        int budget = CommitBudget(frame);
+        long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - preparedAt.Value;
+        return budget > 0 && budget <= 10000 &&
+            elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency < budget;
+    }
+
+    private static int CommitBudget(Frame frame)
+    {
+        return (frame.Data[0] << 24) | (frame.Data[1] << 16) | (frame.Data[2] << 8) | frame.Data[3];
     }
 
     private void ReadInventory()
@@ -148,9 +206,14 @@ internal sealed class TlsLink : IDisposable
 
     internal void Acknowledge(byte[] id)
     {
+        EnqueueControl(new Frame(Wire.Ack, id, new byte[0]));
+    }
+
+    private void EnqueueControl(Frame frame)
+    {
         lock (acknowledgements)
         {
-            acknowledgements.Enqueue(new Frame(Wire.Ack, id, new byte[0]));
+            acknowledgements.Enqueue(frame);
             if (ackWriterScheduled) return;
             ackWriterScheduled = true;
         }

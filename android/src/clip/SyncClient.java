@@ -111,7 +111,8 @@ final class SyncClient implements Closeable {
                         if (frame.kind < Wire.TEXT || frame.kind > Wire.DELETE)
                             throw new IOException("Unexpected message");
                         if (frame.kind >= Wire.HISTORY_TEXT || !Arrays.equals(lastApplied, frame.id)) {
-                            receiver.apply(frame);
+                            try { receiver.apply(frame); }
+                            catch (Wire.ExpiredImage expired) { continue; }
                             if (frame.kind < Wire.HISTORY_TEXT) lastApplied = frame.id;
                         }
                         if (frame.kind < Wire.HISTORY_TEXT) current.acknowledge(frame.id);

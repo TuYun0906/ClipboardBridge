@@ -56,6 +56,7 @@ public final class AndroidHostCheck {
                     Wire.Frame image = frame(Wire.IMAGE, i, "host image " + i);
                     if (i == 22) Wire.markCompressed(image.id, 70, 100);
                     if (i == 21) image = new Wire.Frame(image.kind, image.id, image.data, true);
+                    if (i == 23) image.deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     host.submit(image, i == 23 ? delivered::countDown : null);
                     if (i == 21) host.publish(new Wire.Frame(Wire.HISTORY_IMAGE, image.id, image.data));
                 }
@@ -90,6 +91,32 @@ public final class AndroidHostCheck {
                 peer.send(new Wire.Frame(Wire.ACK, expired.id, new byte[0]));
                 check(peer.read(), Wire.IMAGE, "next image");
                 if (expiredAck.get()) throw new AssertionError("Cancelled image falsely acknowledged");
+            }
+            try (TlsLink slow = TlsLink.connect("127.0.0.1", host.port(), pin, key, () -> new byte[0])) {
+                check(slow.read(), Wire.HISTORY_TEXT, "host history");
+                check(slow.read(), Wire.HISTORY_IMAGE, "known image");
+                Wire.Frame screenshot = new Wire.Frame(Wire.IMAGE, frame(Wire.IMAGE, 32, "id").id,
+                        new byte[3 * Wire.PART_LIMIT], true);
+                screenshot.deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(800);
+                host.submit(screenshot, () -> { throw new AssertionError("Expired screenshot confirmed"); });
+                // Without a reader, READY cannot be sent even though TCP accepted all the parts.
+                Thread.sleep(1050);
+                host.cancelImage(screenshot);
+                host.publish(frame(Wire.HISTORY_TEXT, 33, "same connection"));
+                check(slow.read(), Wire.HISTORY_TEXT, "same connection");
+                host.submit(frame(Wire.IMAGE, 34, "following image"));
+                check(slow.read(), Wire.IMAGE, "following image");
+
+                Wire.Frame part = frame(Wire.IMAGE_PART, 35, "late screenshot");
+                slow.send(part);
+                slow.send(new Wire.Frame(Wire.IMAGE_PREPARE, part.id, new byte[0]));
+                // A probe response proves the receiver processed PREPARE while this client was online.
+                slow.send(frame(Wire.HISTORY_TEXT, 36, "prepare observed"));
+                check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "prepare observed");
+                Thread.sleep(60);
+                slow.send(new Wire.Frame(Wire.IMAGE_END, part.id, new byte[]{0, 0, 0, 1}));
+                slow.send(frame(Wire.HISTORY_TEXT, 37, "late commit discarded"));
+                check(received.poll(8, TimeUnit.SECONDS), Wire.HISTORY_TEXT, "late commit discarded");
             }
         }
     }

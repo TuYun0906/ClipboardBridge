@@ -1,7 +1,6 @@
 package clip;
 
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -9,18 +8,32 @@ import java.io.OutputStream;
 final class Wire {
     static final int AUTH = 1, TEXT = 2, IMAGE = 3, ACK = 4, HISTORY_TEXT = 5, HISTORY_IMAGE = 6, DELETE = 7;
     static final int IMAGE_INVENTORY = 8, SAVED_IMAGE = 9;
+    static final int IMAGE_PART = 10, SAVED_IMAGE_PART = 11, IMAGE_END = 12, IMAGE_ABORT = 13;
+    static final int IMAGE_PREPARE = 14, IMAGE_READY = 15;
+    static final int PART_LIMIT = 32 * 1024;
+    private static final byte[] PART_VERSION = {67, 67, 73, 49};
     private static final byte[] SYNC_VERSION = {67, 66, 73, 77, 71, 2, 117, 57};
 
-    static void offerImageSync(byte[] id) { System.arraycopy(SYNC_VERSION, 0, id, 0, SYNC_VERSION.length); }
+    static void offerImageSync(byte[] id) {
+        System.arraycopy(SYNC_VERSION, 0, id, 0, SYNC_VERSION.length);
+        System.arraycopy(PART_VERSION, 0, id, 8, PART_VERSION.length);
+    }
+
+    static boolean offersImageParts(byte[] id) {
+        for (int i = 0; i < PART_VERSION.length; i++) if (id[8 + i] != PART_VERSION[i]) return false;
+        return true;
+    }
 
     static boolean offersImageSync(byte[] id) {
         for (int i = 0; i < SYNC_VERSION.length; i++) if (id[i] != SYNC_VERSION[i]) return false;
         return true;
     }
 
-    static byte[] acceptImageSync(byte[] id) {
+    static byte[] acceptImageSync(byte[] id) { return acceptImageSync(id, false); }
+
+    static byte[] acceptImageSync(byte[] id, boolean parts) {
         byte[] reply = id.clone();
-        reply[15] ^= 1;
+        reply[15] ^= parts ? 2 : 1;
         return reply;
     }
 
@@ -50,12 +63,17 @@ final class Wire {
 
     static final int TEXT_LIMIT = 1024 * 1024, IMAGE_LIMIT = 24 * 1024 * 1024;
 
+    static final class ExpiredImage extends IOException { }
+
     static final class Frame {
         final int kind;
         final byte[] id;
         final byte[] data;
         final boolean saveImage;
         volatile boolean cancelled;
+        long deadlineNanos;
+
+        boolean expired() { return cancelled || (deadlineNanos != 0 && System.nanoTime() - deadlineNanos >= 0); }
 
         Frame(int kind, byte[] id, byte[] data) { this(kind, id, data, false); }
 
@@ -83,18 +101,26 @@ final class Wire {
     static void write(OutputStream target, Frame frame) throws IOException {
         validateLength(frame.kind, frame.data.length);
         if (frame.id.length != ID_SIZE) throw new IOException("Invalid message ID");
-        DataOutputStream out = new DataOutputStream(target);
-        out.writeByte(frame.kind);
-        out.write(frame.id);
-        out.writeInt(frame.data.length);
-        out.write(frame.data);
-        out.flush();
+        int count = frame.data.length;
+        byte[] header = new byte[1 + ID_SIZE + 4];
+        header[0] = (byte)frame.kind;
+        System.arraycopy(frame.id, 0, header, 1, ID_SIZE);
+        for (int i = 0; i < 4; i++) header[1 + ID_SIZE + i] = (byte)(count >>> (24 - 8 * i));
+        target.write(header);
+        target.write(frame.data);
+        target.flush();
     }
 
     private static void validateLength(int kind, int count) throws IOException {
         boolean valid;
         switch (kind) {
             case AUTH: valid = count == KEY_SIZE; break;
+            case IMAGE_PART:
+            case SAVED_IMAGE_PART: valid = count > 0 && count <= PART_LIMIT; break;
+            case IMAGE_END: valid = count == 0 || count == 4; break;
+            case IMAGE_ABORT:
+            case IMAGE_PREPARE:
+            case IMAGE_READY:
             case DELETE:
             case ACK: valid = count == 0; break;
             case HISTORY_TEXT:

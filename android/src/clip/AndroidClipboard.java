@@ -67,8 +67,28 @@ final class AndroidClipboard {
             if (!((Bitmap)snapshot).compress(Bitmap.CompressFormat.PNG, 100, png))
                 throw new IOException("Could not encode screenshot");
             byte[] imageId = id();
-            return new Wire.Frame(Wire.IMAGE, imageId,
-                    imageBytes(new java.io.ByteArrayInputStream(png.toByteArray()), compress, imageId));
+            byte[] original = png.toByteArray();
+            byte[] result = original;
+            Bitmap source = (Bitmap)snapshot;
+            if (compress) {
+                double scale = Math.min(1, 1920.0 / Math.max(source.getWidth(), source.getHeight()));
+                Bitmap reduced = scale == 1 ? source : Bitmap.createScaledBitmap(source,
+                        Math.max(1, (int)Math.round(source.getWidth() * scale)),
+                        Math.max(1, (int)Math.round(source.getHeight() * scale)), true);
+                try {
+                    png.reset();
+                    Bitmap.CompressFormat format = hasTransparency(reduced)
+                            ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG;
+                    if (reduced.compress(format, 82, png) && png.size() < original.length) {
+                        result = png.toByteArray();
+                        Wire.markCompressed(imageId, result.length, original.length);
+                    }
+                } finally {
+                    if (reduced != source) reduced.recycle();
+                }
+            }
+            if (result.length > Wire.IMAGE_LIMIT) throw new IOException("Image exceeds size limit");
+            return new Wire.Frame(Wire.IMAGE, imageId, result);
         }
         if (snapshot instanceof Uri) {
             byte[] imageId = id();
@@ -89,7 +109,8 @@ final class AndroidClipboard {
     }
 
     // Image storage and validation run on the receiving worker before acknowledging the frame.
-    void apply(Wire.Frame frame) throws IOException {
+    synchronized void apply(Wire.Frame frame) throws IOException {
+        if (frame.expired()) throw new Wire.ExpiredImage();
         ClipData clip;
         if (frame.kind == Wire.TEXT) {
             String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -99,7 +120,16 @@ final class AndroidClipboard {
             String extension = ImageFormat.extension(frame.data);
             validateImage(frame.data);
             Uri uri = ClipboardImages.store(context, frame.data, extension);
-            clip = ClipData.newUri(context.getContentResolver(), remoteLabel, uri);
+            boolean applied = false;
+            try {
+                clip = ClipData.newUri(context.getContentResolver(), remoteLabel, uri);
+                if (frame.expired()) throw new Wire.ExpiredImage();
+                manager.setPrimaryClip(clip);
+                applied = true;
+            } finally {
+                ClipboardImages.finish(context, uri, applied);
+            }
+            return;
         } else throw new IOException("Unexpected clipboard frame");
         manager.setPrimaryClip(clip);
     }

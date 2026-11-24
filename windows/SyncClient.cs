@@ -135,7 +135,8 @@ internal sealed class SyncClient : ISyncConnection
                         {
                             if (lastReceived == null || !lastReceived.SequenceEqual(frame.Id))
                             {
-                                receive(frame, Publish);
+                                try { receive(frame, Publish); }
+                                catch (ExpiredImageException) { continue; }
                                 lastReceived = frame.Id;
                             }
                             current.Acknowledge(frame.Id);

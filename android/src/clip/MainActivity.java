@@ -547,7 +547,7 @@ public final class MainActivity extends Activity {
                         android.content.res.ColorStateList.valueOf(0x283368ea), surface, null));
                 card.setPadding(dp(12), dp(10), dp(12), dp(8));
                 if (entry.kind == Wire.IMAGE) {
-                    card.setContentDescription(entry.compressionPercent >= 0 ? "已压缩的图片记录" : "图片记录");
+                    card.setContentDescription(entry.compressionLabel != null ? "已压缩的图片记录" : "图片记录");
                     previews.put(entry.key, addHistoryImage(card, service, entry));
                 }
                 else {
@@ -559,9 +559,8 @@ public final class MainActivity extends Activity {
                 }
                 ZonedDateTime copied = entry.copiedAt == 0 ? null : Instant.ofEpochMilli(entry.copiedAt).atZone(zone);
                 String timeLabel = copied == null ? "复制时间未知" : timestamp.format(copied);
-                if (entry.compressionPercent >= 0) {
-                    String compression = entry.compressionPercent == 0 ? "已压缩" :
-                            "已压缩至原" + entry.compressionPercent + "%";
+                if (entry.compressionLabel != null) {
+                    String compression = entry.compressionLabel;
                     add(card, Style.label(this, compression, 12, Style.BLUE, false), 5, -2);
                 }
                 add(card, Style.label(this, timeLabel, 12, Style.MUTED, false), 5, -2);

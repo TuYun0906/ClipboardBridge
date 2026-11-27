@@ -68,7 +68,27 @@ final class Wire {
         return hasMark(id, COMPRESSED_MARK) ? 0 : -1;
     }
 
-    static boolean isCompressed(byte[] id) { return compressionPercent(id) >= 0; }
+    // The first two bytes cannot be a v4 UUID version in either endpoint's byte order.
+    static void markCompressedSize(byte[] id, int originalBytes) {
+        id[6] = (byte)0xC2;
+        id[7] = (byte)0xA8;
+        for (int i = 11; i >= 8; i--, originalBytes >>>= 8) id[i] = (byte)originalBytes;
+    }
+
+    static String compressionLabel(byte[] id, int sentBytes) {
+        if (id[6] == (byte)0xC2 && id[7] == (byte)0xA8) {
+            int original = 0;
+            for (int i = 8; i <= 11; i++) original = (original << 8) | (id[i] & 255);
+            if (sentBytes <= 0 || original <= sentBytes) return null;
+            long hundredths = (10000L * sentBytes + original / 2) / original;
+            if (hundredths == 0) return "已压缩至原<0.01%";
+            if (hundredths == 10000) return "已压缩至原<100%";
+            String percentage = String.format(java.util.Locale.ROOT, "%.2f", hundredths / 100.0);
+            return "已压缩至原" + percentage.replaceFirst("\\.?0+$", "") + "%";
+        }
+        int legacy = compressionPercent(id);
+        return legacy < 0 ? null : legacy == 0 ? "已压缩" : "已压缩至原" + legacy + "%";
+    }
 
     private static boolean hasMark(byte[] id, byte[] mark) {
         for (int i = 0; i < mark.length; i++) if (id[6 + i] != mark[i]) return false;

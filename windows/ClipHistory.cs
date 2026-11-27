@@ -14,7 +14,7 @@ internal sealed class ClipHistory
         internal byte Kind;
         internal string ContentKey;
         internal DateTime? CopyTime;
-        internal int CompressionPercent;
+        internal string CompressionLabel;
     }
 
     private readonly string directory;
@@ -180,7 +180,7 @@ internal sealed class ClipHistory
         {
             Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind,
             ContentKey = contentKey,
-            CompressionPercent = frame.Kind == Wire.Image ? Wire.CompressionPercent(frame.Id) : -1,
+            CompressionLabel = frame.Kind == Wire.Image ? Wire.CompressionLabel(frame.Id, frame.Data.Length) : null,
             CopyTime = stamp.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(stamp.Value).LocalDateTime : (DateTime?)null
         };
     }

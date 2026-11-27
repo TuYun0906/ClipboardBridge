@@ -95,7 +95,30 @@ internal static class Wire
         return HasMark(id, CompressedMark) ? 0 : -1;
     }
 
-    internal static bool IsCompressed(byte[] id) { return CompressionPercent(id) >= 0; }
+    // The first two bytes cannot be a v4 UUID version in either endpoint's byte order.
+    internal static void MarkCompressedSize(byte[] id, int originalBytes)
+    {
+        id[6] = 0xC2;
+        id[7] = 0xA8;
+        for (int i = 11; i >= 8; i--, originalBytes >>= 8) id[i] = (byte)originalBytes;
+    }
+
+    internal static string CompressionLabel(byte[] id, int sentBytes)
+    {
+        if (id[6] == 0xC2 && id[7] == 0xA8)
+        {
+            int original = 0;
+            for (int i = 8; i <= 11; i++) original = (original << 8) | id[i];
+            if (sentBytes <= 0 || original <= sentBytes) return null;
+            long hundredths = (10000L * sentBytes + original / 2) / original;
+            if (hundredths == 0) return "已压缩至原<0.01%";
+            if (hundredths == 10000) return "已压缩至原<100%";
+            return "已压缩至原" + (hundredths / 100m).ToString("0.##",
+                System.Globalization.CultureInfo.InvariantCulture) + "%";
+        }
+        int legacy = CompressionPercent(id);
+        return legacy < 0 ? null : legacy == 0 ? "已压缩" : "已压缩至原" + legacy + "%";
+    }
 
     private static bool HasMark(byte[] id, byte[] mark)
     {

@@ -10,12 +10,14 @@ static class ProtocolCheck
         byte[] id = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
         byte[] text = Encoding.UTF8.GetBytes("跨端剪贴板\n🙂");
         byte[] image = { 137, 80, 78, 71, 0, 255 };
+        var imageId = (byte[])id.Clone();
+        Wire.MarkCompressedSize(imageId, 19);
         if (args[0] == "write")
         {
             using (var stream = File.Create(args[1]))
             {
                 Wire.Write(stream, new Frame(Wire.Text, id, text));
-                Wire.Write(stream, new Frame(Wire.Image, id, image));
+                Wire.Write(stream, new Frame(Wire.Image, imageId, image));
                 Wire.Write(stream, new Frame(Wire.Ack, id, new byte[0]));
             }
             return;
@@ -23,7 +25,10 @@ static class ProtocolCheck
         using (var stream = File.OpenRead(args[1]))
         {
             Check(Wire.Read(stream), Wire.Text, id, text);
-            Check(Wire.Read(stream), Wire.Image, id, image);
+            Frame received = Wire.Read(stream);
+            Check(received, Wire.Image, imageId, image);
+            if (Wire.CompressionLabel(received.Id, received.Data.Length) != "已压缩至原31.58%")
+                throw new Exception("Incorrect compression ratio");
             Check(Wire.Read(stream), Wire.Ack, id, new byte[0]);
             if (Wire.Read(stream) != null) throw new Exception("Expected EOF");
         }

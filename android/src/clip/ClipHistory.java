@@ -193,13 +193,13 @@ final class ClipHistory {
         final String key, text, contentKey;
         final int kind;
         final long copiedAt;
-        final int compressionPercent;
+        final String compressionLabel;
         Entry(File file, String key, Wire.Frame frame) {
             this.file = file;
             this.key = key;
             kind = frame.kind;
             copiedAt = copyTime(key);
-            compressionPercent = kind == Wire.IMAGE ? Wire.compressionPercent(frame.id) : -1;
+            compressionLabel = kind == Wire.IMAGE ? Wire.compressionLabel(frame.id, frame.data.length) : null;
             text = kind == Wire.TEXT ? new String(frame.data, StandardCharsets.UTF_8) : "图片";
             contentKey = kind == Wire.IMAGE ? imageDigest(frame.data) : text;
         }

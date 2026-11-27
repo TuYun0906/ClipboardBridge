@@ -62,6 +62,15 @@ internal static class WindowsAppCheck
         if (!actual.SequenceEqual(expected)) throw new Exception("Copied image pixels were lost");
     }
 
+    private static void CheckCompressionRatio(Frame frame, int originalBytes)
+    {
+        long hundredths = (10000L * frame.Data.Length + originalBytes / 2) / originalBytes;
+        string expected = "已压缩至原" + (hundredths / 100m).ToString("0.##",
+            System.Globalization.CultureInfo.InvariantCulture) + "%";
+        if (Wire.CompressionLabel(frame.Id, frame.Data.Length) != expected)
+            throw new Exception("Compression label does not match actual input and output bytes");
+    }
+
     private static void Check(string path)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -81,16 +90,74 @@ internal static class WindowsAppCheck
         var original = WindowsClipboard.ToFrame(noise);
         var compressed = WindowsClipboard.ToFrame(noise, true);
         var decoded = WindowsClipboard.DecodePreview(compressed.Data, 4096);
-        if (decoded.PixelWidth > 1920 || decoded.PixelWidth <= decoded.PixelHeight ||
-            compressed.Data.Length >= original.Data.Length)
-            throw new Exception("Photo compression did not reduce size");
+        if (decoded.PixelWidth > 1600 || decoded.PixelWidth <= decoded.PixelHeight ||
+            compressed.Data.Length > 384 * 1024)
+            throw new Exception("Photo compression did not meet the byte target");
+        CheckCompressionRatio(compressed, original.Data.Length);
+        // TIFF exercises a file that the app would normally convert to PNG before sending.
+        var tiff = new System.Windows.Media.Imaging.TiffBitmapEncoder
+            { Compression = System.Windows.Media.Imaging.TiffCompressOption.None };
+        tiff.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(noise));
+        string photoPath = Path.Combine(path, "photo.tiff");
+        using (var output = File.Create(photoPath)) tiff.Save(output);
+        var photoFile = new FileInfo(photoPath);
+        Frame compressedFile = WindowsClipboard.ToFrame(photoFile, true);
+        CheckCompressionRatio(compressedFile, (int)photoFile.Length);
+        Console.WriteLine("Sample photo: " + original.Data.Length + " -> " + compressed.Data.Length + " bytes");
+        Console.WriteLine("Sample TIFF: " + photoFile.Length + " -> " + compressedFile.Data.Length + " bytes");
         var transparent = System.Windows.Media.Imaging.BitmapSource.Create(1, 1, 96, 96,
             PixelFormats.Bgra32, null, new byte[] {0, 0, 0, 0}, 4);
         var alpha = WindowsClipboard.ToFrame(transparent, true);
-        if (!Wire.IsCompressed(compressed.Id) || Wire.IsCompressed(original.Id) || Wire.IsCompressed(alpha.Id))
+        if (Wire.CompressionLabel(compressed.Id, compressed.Data.Length) == null ||
+            Wire.CompressionLabel(original.Id, original.Data.Length) != null ||
+            Wire.CompressionLabel(alpha.Id, alpha.Data.Length) != null)
             throw new Exception("Compression provenance does not match actual output");
         if (alpha.Data[0] != 137) throw new Exception("Compression lost transparency");
-        Console.WriteLine("PASS: compression reduces photo bytes and preserves transparency");
+        var alphaPixels = new byte[1800 * 900 * 4];
+        new Random(61).NextBytes(alphaPixels);
+        var transparentPhoto = System.Windows.Media.Imaging.BitmapSource.Create(1800, 900, 96, 96,
+            PixelFormats.Bgra32, null, alphaPixels, 1800 * 4);
+        Frame alphaOriginal = WindowsClipboard.ToFrame(transparentPhoto);
+        Frame alphaCompressed = WindowsClipboard.ToFrame(transparentPhoto, true);
+        CheckCompressionRatio(alphaCompressed, alphaOriginal.Data.Length);
+        var rgba = new System.Windows.Media.Imaging.FormatConvertedBitmap(
+            WindowsClipboard.DecodePreview(alphaCompressed.Data, 4096), PixelFormats.Bgra32, null, 0);
+        byte[] line = new byte[rgba.PixelWidth * 4];
+        rgba.CopyPixels(new Int32Rect(0, 0, rgba.PixelWidth, 1), line, line.Length, 0);
+        if (alphaCompressed.Data[0] != 137 || alphaCompressed.Data.Length > 384 * 1024 ||
+            !line.Where((value, index) => index % 4 == 3).Any(value => value < 255))
+            throw new Exception("Transparent image missed the size target or lost alpha");
+        Console.WriteLine("Sample transparent PNG: " + alphaOriginal.Data.Length + " -> " + alphaCompressed.Data.Length + " bytes");
+        var gif = new System.Windows.Media.Imaging.GifBitmapEncoder();
+        gif.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        gif.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(transparent));
+        byte[] gifBytes;
+        using (var gifStream = new MemoryStream())
+        {
+            gif.Save(gifStream);
+            gifBytes = gifStream.ToArray();
+        }
+        var keptGif = WindowsClipboard.ToFrame(gifBytes, true);
+        if (!keptGif.Data.SequenceEqual(gifBytes) || Wire.CompressionLabel(keptGif.Id, keptGif.Data.Length) != null)
+            throw new Exception("Animated GIF was re-encoded");
+
+        if (!WindowsClipboard.ToFrame(original.Data, false).Data.SequenceEqual(original.Data))
+            throw new Exception("The disabled compression switch changed a PNG file");
+        var metadata = new System.Windows.Media.Imaging.BitmapMetadata("jpg");
+        metadata.SetQuery("/app1/ifd/{ushort=274}", (ushort)6);
+        var jpeg = new System.Windows.Media.Imaging.JpegBitmapEncoder { QualityLevel = 95 };
+        jpeg.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(noise, null, metadata, null));
+        using (var jpegStream = new MemoryStream())
+        {
+            jpeg.Save(jpegStream);
+            byte[] jpegBytes = jpegStream.ToArray();
+            Frame rotated = WindowsClipboard.ToFrame(jpegBytes, true);
+            var upright = WindowsClipboard.DecodePreview(rotated.Data, 4096);
+            if (upright.PixelWidth >= upright.PixelHeight)
+                throw new Exception("Lossy encoding ignored the source orientation");
+            CheckCompressionRatio(rotated, jpegBytes.Length);
+        }
+        Console.WriteLine("PASS: compression reduces photo bytes and preserves transparency, GIF and EXIF orientation");
         CheckClipboardFormats(path);
         using (var program = new Program(app, path))
         {

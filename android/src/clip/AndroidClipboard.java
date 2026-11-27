@@ -63,33 +63,17 @@ final class AndroidClipboard {
 
     Wire.Frame makeFrame(Object snapshot, boolean compress) throws IOException {
         if (snapshot instanceof Bitmap) {
-            ByteArrayOutputStream png = new ByteArrayOutputStream();
-            if (!((Bitmap)snapshot).compress(Bitmap.CompressFormat.PNG, 100, png))
-                throw new IOException("Could not encode screenshot");
-            byte[] imageId = id();
-            byte[] original = png.toByteArray();
-            byte[] result = original;
             Bitmap source = (Bitmap)snapshot;
-            if (compress) {
-                double scale = Math.min(1, 1920.0 / Math.max(source.getWidth(), source.getHeight()));
-                Bitmap reduced = scale == 1 ? source : Bitmap.createScaledBitmap(source,
-                        Math.max(1, (int)Math.round(source.getWidth() * scale)),
-                        Math.max(1, (int)Math.round(source.getHeight() * scale)), true);
-                try {
-                    png.reset();
-                    Bitmap.CompressFormat format = hasTransparency(reduced)
-                            ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG;
-                    if (reduced.compress(format, 82, png) && png.size() < original.length) {
-                        result = png.toByteArray();
-                        Wire.markCompressed(imageId, result.length, original.length);
-                    }
-                } finally {
-                    if (reduced != source) reduced.recycle();
-                }
-            }
+            byte[] original = encode(source, Bitmap.CompressFormat.PNG, 100);
+            if (original == null) throw new IOException("Could not encode screenshot");
+            byte[] imageId = id();
+            byte[] result = compress ? compressBitmap(source, original.length, original.length) : null;
+            if (result == null) result = original;
             if (result.length > Wire.IMAGE_LIMIT) throw new IOException("Image exceeds size limit");
+            if (result.length < original.length) Wire.markCompressedSize(imageId, original.length);
             return new Wire.Frame(Wire.IMAGE, imageId, result);
         }
+
         if (snapshot instanceof Uri) {
             byte[] imageId = id();
             return new Wire.Frame(Wire.IMAGE, imageId, imageBytes((Uri) snapshot, compress, imageId));
@@ -142,53 +126,44 @@ final class AndroidClipboard {
     }
 
     private byte[] imageBytes(InputStream in, boolean compress, byte[] imageId) throws IOException {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buffer = new byte[16384];
-            for (int n; (n = in.read(buffer)) != -1;) {
-                if (out.size() + n > Wire.IMAGE_LIMIT) throw new IOException("Image exceeds size limit");
-                out.write(buffer, 0, n);
-            }
-            byte[] data = out.toByteArray();
-            BitmapFactory.Options bounds = validateImage(data);
-            String format = ImageFormat.extension(data);
-            if (compress && !"gif".equals(format)) {
-                byte[] candidate = compress(data, bounds);
-                if (candidate != null && candidate.length < data.length) {
-                    Wire.markCompressed(imageId, candidate.length, data.length);
-                    return candidate;
-                }
-            }
-            if (format != null) return data;
-
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[16384];
+        for (int n; (n = in.read(buffer)) != -1;) {
+            if (out.size() + n > Wire.IMAGE_LIMIT) throw new IOException("Image exceeds size limit");
+            out.write(buffer, 0, n);
+        }
+        byte[] data = out.toByteArray();
+        BitmapFactory.Options bounds = validateImage(data);
+        String format = ImageFormat.extension(data);
+        if ("gif".equals(format)) return data;
+        byte[] result = data;
+        if (format == null) {
             Bitmap decoded = BitmapFactory.decodeByteArray(data, 0, data.length);
             if (decoded == null) throw new IOException("Invalid image");
-            try {
-                out.reset();
-                if (!decoded.compress(Bitmap.CompressFormat.PNG, 100, out) ||
-                        out.size() > Wire.IMAGE_LIMIT) throw new IOException("Converted image exceeds size limit");
-                return out.toByteArray();
-            } finally { decoded.recycle(); }
+            try { result = encode(decoded, Bitmap.CompressFormat.PNG, 100); }
+            finally { decoded.recycle(); }
+            if (result == null) throw new IOException("Could not convert image");
+        }
+        if (compress) {
+            byte[] candidate = compressEncoded(data, bounds, result.length);
+            if (candidate != null) result = candidate;
+        }
+        if (result.length > Wire.IMAGE_LIMIT)
+            throw new IOException("Converted image exceeds size limit");
+        if (compress && result.length < data.length) Wire.markCompressedSize(imageId, data.length);
+        return result;
     }
 
-    private static byte[] compress(byte[] bytes, BitmapFactory.Options bounds) throws IOException {
-        final int limit = 1920;
+    private static byte[] compressEncoded(byte[] bytes, BitmapFactory.Options bounds, int uncompressedPayloadBytes) throws IOException {
         BitmapFactory.Options opts = new BitmapFactory.Options();
         opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
         opts.inSampleSize = 1;
         int longest = Math.max(bounds.outWidth, bounds.outHeight);
-        while (longest / (opts.inSampleSize * 2) >= limit) opts.inSampleSize *= 2;
+        while (longest / (opts.inSampleSize * 2) >= 1600) opts.inSampleSize *= 2;
         Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
         if (decoded == null) throw new IOException("Invalid image");
-        Bitmap scaled = decoded, oriented = decoded;
+        Bitmap oriented = decoded;
         try {
-            int side = Math.max(decoded.getWidth(), decoded.getHeight());
-            if (side > limit) {
-                float ratio = (float)limit / side;
-                scaled = Bitmap.createScaledBitmap(decoded, Math.max(1, Math.round(decoded.getWidth() * ratio)),
-                        Math.max(1, Math.round(decoded.getHeight() * ratio)), true);
-            }
-
-            oriented = scaled;
             try {
                 android.media.ExifInterface exif = new android.media.ExifInterface(new java.io.ByteArrayInputStream(bytes));
                 int orientation = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
@@ -199,18 +174,51 @@ final class AndroidClipboard {
                     if (orientation == 3 || orientation == 4) transform.postRotate(180);
                     if (orientation == 6 || orientation == 7) transform.postRotate(90);
                     if (orientation == 5 || orientation == 8) transform.postRotate(270);
-                    oriented = Bitmap.createBitmap(scaled, 0, 0, scaled.getWidth(), scaled.getHeight(), transform, true);
+                    oriented = Bitmap.createBitmap(decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), transform, true);
                 }
             } catch (IOException ignored) { }
-
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            Bitmap.CompressFormat target = hasTransparency(oriented) ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG;
-            return oriented.compress(target, 82, output) && output.size() <= Wire.IMAGE_LIMIT ? output.toByteArray() : null;
+            return compressBitmap(oriented, bytes.length, uncompressedPayloadBytes);
         } finally {
-            if (oriented != scaled && oriented != decoded) oriented.recycle();
-            if (scaled != decoded) scaled.recycle();
+            if (oriented != decoded) oriented.recycle();
             decoded.recycle();
         }
+    }
+
+    private static byte[] compressBitmap(Bitmap source, int originalBytes, int uncompressedPayloadBytes) {
+        boolean transparent = hasTransparency(source);
+        int[] sides = transparent ? new int[]{1600, 1120, 800, 560, 400} : new int[]{1600, 1280, 1024, 768};
+        int[] qualities = {74, 65, 56, 48};
+        int target = (int)Math.min(384 * 1024, 2L * Math.min(originalBytes, uncompressedPayloadBytes) / 3);
+        int longest = Math.max(source.getWidth(), source.getHeight());
+        int previousSide = 0;
+        byte[] best = null;
+        for (int pass = 0; pass < sides.length; pass++) {
+            int side = Math.min(longest, sides[pass]);
+            if (transparent && side == previousSide) continue;
+            previousSide = side;
+            Bitmap reduced = source;
+            if (side < longest) {
+                double scale = (double)side / longest;
+                reduced = Bitmap.createScaledBitmap(source,
+                        Math.max(1, (int)Math.round(source.getWidth() * scale)),
+                        Math.max(1, (int)Math.round(source.getHeight() * scale)), true);
+            }
+            try {
+                byte[] candidate = transparent ? encode(reduced, Bitmap.CompressFormat.PNG, 100)
+                        : encode(reduced, Bitmap.CompressFormat.JPEG, qualities[pass]);
+                if (candidate != null && candidate.length < uncompressedPayloadBytes && (best == null || candidate.length < best.length))
+                    best = candidate;
+            } finally {
+                if (reduced != source) reduced.recycle();
+            }
+            if (best != null && best.length <= target) break;
+        }
+        return best;
+    }
+
+    private static byte[] encode(Bitmap image, Bitmap.CompressFormat format, int quality) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        return image.compress(format, quality, out) ? out.toByteArray() : null;
     }
 
     private static boolean hasTransparency(Bitmap bitmap) {

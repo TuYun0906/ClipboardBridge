@@ -173,41 +173,53 @@ internal sealed class WindowsClipboard : IDisposable
         if (bitmap == null && image != null) bitmap = Decode(image);
         if (bitmap == null) throw new IOException("无法读取图片");
         ValidateDimensions(bitmap);
-        byte[] result;
-        int originalBytes = 0;
-        if (!compress)
+        bool encoded = image != null && IsStandardImage(image);
+        bool bmp = encoded && image[0] == 'B' && image[1] == 'M';
+        byte[] result = encoded && !bmp ? image : Encode(bitmap, new PngBitmapEncoder());
+        if (bmp && image.Length < result.Length) result = image;
+        int originalBytes = image != null ? image.Length : result.Length;
+        if (compress && (image == null || !IsGif(image)))
         {
-            bool encoded = image != null && IsStandardImage(image);
-            bool bmp = encoded && image[0] == 'B' && image[1] == 'M';
-            result = encoded && !bmp ? image : Encode(bitmap, new PngBitmapEncoder());
-            if (bmp && image.Length < result.Length) result = image;
+            BitmapSource source = image != null ? OrientForCompression(bitmap, image) : bitmap;
+            byte[] candidate = CompressImage(source, originalBytes, result.Length);
+            if (candidate != null) result = candidate;
         }
-        else if (image != null && IsGif(image)) result = image;
-        else
-        {
-            if (image != null) bitmap = OrientForCompression(bitmap, image);
-            bool transparent = HasTransparency(bitmap);
-            int longest = Math.Max(bitmap.PixelWidth, bitmap.PixelHeight);
-            // Never upscale an image.
-            BitmapSource reduced = bitmap;
-            if (longest > 1920)
-            {
-                double scale = 1920.0 / longest;
-                reduced = new TransformedBitmap(bitmap, new ScaleTransform(
-                    Math.Max(1, bitmap.PixelWidth * scale) / bitmap.PixelWidth,
-                    Math.Max(1, bitmap.PixelHeight * scale) / bitmap.PixelHeight));
-            }
-            result = Encode(reduced, transparent ? (BitmapEncoder)new PngBitmapEncoder()
-                : new JpegBitmapEncoder { QualityLevel = 82 });
-            byte[] baseline = image != null && IsStandardImage(image) ? image :
-                Encode(bitmap, new PngBitmapEncoder());
-            if (result.Length < baseline.Length) originalBytes = baseline.Length;
-            else result = baseline;
-        }
+
         if (result.Length > Wire.ImageLimit) throw new IOException("图片超过大小限制");
         byte[] id = NewId();
-        if (originalBytes > 0) Wire.MarkCompressed(id, result.Length, originalBytes);
+        if (compress && result.Length < originalBytes) Wire.MarkCompressedSize(id, originalBytes);
         return new Frame(Wire.Image, id, result);
+    }
+
+    private static byte[] CompressImage(BitmapSource source, int originalBytes, int uncompressedPayloadBytes)
+    {
+        bool transparent = HasTransparency(source);
+        int[] sides = transparent ? new[] { 1600, 1120, 800, 560, 400 } : new[] { 1600, 1280, 1024, 768 };
+        int[] qualities = { 74, 65, 56, 48 };
+        int target = (int)Math.Min(384 * 1024, 2L * Math.Min(originalBytes, uncompressedPayloadBytes) / 3);
+        int longest = Math.Max(source.PixelWidth, source.PixelHeight);
+        int previousSide = 0;
+        byte[] best = null;
+        for (int pass = 0; pass < sides.Length; pass++)
+        {
+            int side = Math.Min(longest, sides[pass]);
+            if (transparent && side == previousSide) continue;
+            previousSide = side;
+            BitmapSource reduced = source;
+            if (side < longest)
+            {
+                double scale = (double)side / longest;
+                reduced = new TransformedBitmap(source, new ScaleTransform(
+                    Math.Max(1, Math.Round(source.PixelWidth * scale)) / source.PixelWidth,
+                    Math.Max(1, Math.Round(source.PixelHeight * scale)) / source.PixelHeight));
+            }
+            byte[] candidate = Encode(reduced, transparent ? (BitmapEncoder)new PngBitmapEncoder()
+                : new JpegBitmapEncoder { QualityLevel = qualities[pass] });
+            if (candidate.Length < uncompressedPayloadBytes && (best == null || candidate.Length < best.Length))
+                best = candidate;
+            if (best != null && best.Length <= target) break;
+        }
+        return best;
     }
 
     private static BitmapSource OrientForCompression(BitmapSource bitmap, byte[] image)

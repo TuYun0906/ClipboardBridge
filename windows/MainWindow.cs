@@ -198,7 +198,7 @@ internal sealed class MainWindow : Window
                     VerticalAlignment = VerticalAlignment.Center };
                 if (entry.Kind == Wire.Image)
                 {
-                    row.Height = entry.CompressionPercent >= 0 ? 99 : 82;
+                    row.Height = entry.CompressionLabel != null ? 99 : 82;
                     copy.Height = delete.Height = 36;
                     AddHistoryImage(details, entry.Path);
                 }
@@ -206,9 +206,9 @@ internal sealed class MainWindow : Window
                 string timestamp = entry.CopyTime.HasValue
                     ? entry.CopyTime.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
                     : "复制时间未知";
-                if (entry.CompressionPercent >= 0)
+                if (entry.CompressionLabel != null)
                 {
-                    string compression = entry.CompressionPercent == 0 ? "已压缩" : "已压缩至原" + entry.CompressionPercent + "%";
+                    string compression = entry.CompressionLabel;
                     var badge = Label(compression, 12, Blue, false);
                     badge.Margin = new Thickness(0, 3, 0, 0);
                     details.Children.Add(badge);

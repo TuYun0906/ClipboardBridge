@@ -16,7 +16,8 @@ internal sealed class TlsLink : IDisposable
     private readonly HashSet<string> knownImages = new HashSet<string>();
     private bool imageSync;
     private bool imageParts, imageProgress;
-    private Frame firstPart;
+    private Frame firstPart, incomingSource;
+    internal string PeerDevice { get; private set; }
     private MemoryStream imageBuffer;
     private long? preparedAt;
     private readonly Queue<Frame> acknowledgements = new Queue<Frame>();
@@ -29,7 +30,7 @@ internal sealed class TlsLink : IDisposable
     }
 
     internal static TlsLink Accept(TcpClient socket, X509Certificate2 certificate, byte[] key,
-        Func<byte[]> inventory = null)
+        Func<byte[]> inventory = null, string deviceName = null)
     {
         try
         {
@@ -53,8 +54,15 @@ internal sealed class TlsLink : IDisposable
                 link.Send(new Frame(Wire.Ack, reply, new byte[0]));
                 if (upgraded)
                 {
-                    link.Send(new Frame(Wire.ImageInventory, hello.Id, inventory()));
-                    link.ReadInventory();
+                    bool devices = deviceName != null && link.imageProgress;
+                    byte[] extension = Wire.DeviceInventoryId(hello.Id);
+                    link.Send(new Frame(Wire.ImageInventory, devices ? extension : hello.Id, inventory()));
+                    byte[] peerInventory = link.ReadInventory();
+                    if (devices && peerInventory.SequenceEqual(extension))
+                    {
+                        link.Send(new Frame(Wire.Device, hello.Id, Wire.NameBytes(deviceName)));
+                        link.ReadDevice(hello.Id);
+                    }
                     link.imageSync = true;
                 }
                 socket.ReceiveTimeout = 0;
@@ -74,7 +82,7 @@ internal sealed class TlsLink : IDisposable
     }
 
     internal static TlsLink Connect(TcpClient socket, string host, int port, byte[] pin, byte[] key,
-        Func<byte[]> inventory = null)
+        Func<byte[]> inventory = null, string deviceName = null)
     {
         var connected = socket.BeginConnect(host, port, null, null);
         using (var wait = connected.AsyncWaitHandle)
@@ -107,8 +115,15 @@ internal sealed class TlsLink : IDisposable
                 (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id, true)));
             if (link.imageParts || (inventory != null && ack.Id.SequenceEqual(Wire.AcceptImageSync(id))))
             {
-                link.ReadInventory();
-                link.Send(new Frame(Wire.ImageInventory, id, inventory()));
+                byte[] extension = Wire.DeviceInventoryId(id);
+                byte[] peerInventory = link.ReadInventory();
+                bool devices = deviceName != null && link.imageProgress && peerInventory.SequenceEqual(extension);
+                link.Send(new Frame(Wire.ImageInventory, devices ? extension : id, inventory()));
+                if (devices)
+                {
+                    link.Send(new Frame(Wire.Device, id, Wire.NameBytes(deviceName)));
+                    link.ReadDevice(id);
+                }
                 link.imageSync = true;
             }
             else if (!ack.Id.SequenceEqual(id)) throw new AuthenticationException("Pairing rejected");
@@ -128,9 +143,14 @@ internal sealed class TlsLink : IDisposable
         {
             var frame = Wire.Read(stream);
             if (frame == null) return null;
+            if (PeerDevice != null && frame.Kind == Wire.Source)
+            {
+                incomingSource = frame;
+                continue;
+            }
             if (imageSync && frame.Kind == Wire.SavedImage)
-                return new Frame(Wire.Image, frame.Id, frame.Data, true);
-            if (!imageParts || frame.Kind < Wire.ImagePart || frame.Kind > Wire.ImageReady) return frame;
+                return WithIncomingSource(new Frame(Wire.Image, frame.Id, frame.Data, true));
+            if (!imageParts || frame.Kind < Wire.ImagePart || frame.Kind > Wire.ImageReady) return WithIncomingSource(frame);
             if (frame.Kind == Wire.ImagePart || frame.Kind == Wire.SavedImagePart)
             {
                 if (firstPart == null)
@@ -168,8 +188,20 @@ internal sealed class TlsLink : IDisposable
             preparedAt = null;
             imageBuffer.Dispose();
             imageBuffer = null;
-            if (completed != null) return completed;
+            if (completed != null) return WithIncomingSource(completed);
+            incomingSource = null;
         }
+    }
+
+    private Frame WithIncomingSource(Frame frame)
+    {
+        if (incomingSource != null && (frame.Kind == Wire.Text || frame.Kind == Wire.Image ||
+            frame.Kind == Wire.HistoryText || frame.Kind == Wire.HistoryImage))
+        {
+            if (incomingSource.Id.SequenceEqual(frame.Id)) frame.Source = Wire.ReadName(incomingSource);
+            incomingSource = null;
+        }
+        return frame;
     }
 
     private bool CanCommit(Frame frame)
@@ -187,12 +219,30 @@ internal sealed class TlsLink : IDisposable
         return (frame.Data[0] << 24) | (frame.Data[1] << 16) | (frame.Data[2] << 8) | frame.Data[3];
     }
 
-    private void ReadInventory()
+    private void ReadDevice(byte[] id)
+    {
+        Frame frame = Read();
+        if (frame == null || frame.Kind != Wire.Device || !frame.Id.SequenceEqual(id))
+            throw new IOException("Peer device name missing");
+        PeerDevice = Wire.ReadName(frame);
+    }
+
+    private byte[] ReadInventory()
     {
         var frame = Read();
         if (frame == null || frame.Kind != Wire.ImageInventory) throw new IOException("Image inventory missing");
-        for (int offset = 0; offset < frame.Data.Length; offset += Wire.IdSize)
-            knownImages.Add(Convert.ToBase64String(frame.Data, offset, Wire.IdSize));
+        ReplaceInventory(frame.Data);
+        return frame.Id;
+    }
+
+    internal void ReplaceInventory(byte[] data)
+    {
+        lock (sendLock)
+        {
+            knownImages.Clear();
+            for (int offset = 0; offset < data.Length; offset += Wire.IdSize)
+                knownImages.Add(Convert.ToBase64String(data, offset, Wire.IdSize));
+        }
     }
 
     internal void Send(Frame frame)
@@ -204,6 +254,8 @@ internal sealed class TlsLink : IDisposable
             if (frame.Kind == Wire.HistoryImage && knownImages.Contains(key)) return;
             if (frame.Kind == Wire.Delete) knownImages.Remove(key);
             bool savedLive = frame.Kind == Wire.Image && frame.SaveImage;
+            if (frame.Source != null && PeerDevice != null)
+                Wire.Write(stream, new Frame(Wire.Source, frame.Id, Wire.NameBytes(frame.Source)));
             var outgoing = imageSync && savedLive ? new Frame(Wire.SavedImage, frame.Id, frame.Data) : frame;
             Wire.Write(stream, outgoing);
             if (savedLive && !imageSync && !knownImages.Contains(key))
@@ -221,7 +273,7 @@ internal sealed class TlsLink : IDisposable
         EnqueueControl(new Frame(Wire.Ack, id, new byte[0]));
     }
 
-    private void EnqueueControl(Frame frame)
+    internal void EnqueueControl(Frame frame)
     {
         lock (acknowledgements)
         {

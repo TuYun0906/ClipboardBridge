@@ -9,6 +9,16 @@ internal sealed class Frame
     internal readonly byte[] Id;
     internal readonly byte[] Data;
     internal readonly bool SaveImage;
+    internal string Source;
+    internal Action<bool> Completion;
+
+    internal void Complete(bool delivered)
+    {
+        var callback = System.Threading.Interlocked.Exchange(ref Completion, null);
+        if (callback != null) callback(delivered);
+    }
+
+    internal Frame WithSource(string value) { Source = value; return this; }
     internal long? ReceiveDeadline;
 
     internal void CheckDeadline()
@@ -32,6 +42,7 @@ internal static class Wire
     internal const byte ImageInventory = 8, SavedImage = 9;
     internal const byte ImagePart = 10, SavedImagePart = 11, ImageEnd = 12, ImageAbort = 13;
     internal const byte ImagePrepare = 14, ImageReady = 15, ImageProgress = 16;
+    internal const byte Device = 17, Roster = 18, Source = 19, Refresh = 20, RefreshInventory = 21;
     private const int PartLimit = 32 * 1024;
     private static readonly byte[] PartVersion = {67, 67, 73, 49};
     private static readonly byte[] SyncVersion = {67, 66, 73, 77, 71, 2, 117, 57};
@@ -128,6 +139,39 @@ internal static class Wire
 
     internal const int TextLimit = 1024 * 1024, ImageLimit = 24 * 1024 * 1024;
 
+    internal static byte[] DeviceInventoryId(byte[] id)
+    {
+        var result = (byte[])id.Clone();
+        result[15] ^= 16;
+        return result;
+    }
+
+    internal static string DeviceName(string value)
+    {
+        string clean = System.Text.RegularExpressions.Regex.Replace(value ?? "", "[\\p{Cc}\\p{Cf}]", " ").Trim();
+        if (clean.Length > 64) clean = clean.Substring(0, 64).Trim();
+        return clean.Length == 0 ? "未命名设备" : clean;
+    }
+
+    internal static byte[] NameBytes(string value) { return System.Text.Encoding.UTF8.GetBytes(DeviceName(value)); }
+    internal static string ReadName(Frame frame) { return DeviceName(System.Text.Encoding.UTF8.GetString(frame.Data)); }
+
+    internal static void WriteHistory(Stream output, Frame frame)
+    {
+        Write(output, frame);
+        if (frame.Source != null) Write(output, new Frame(Source, frame.Id, NameBytes(frame.Source)));
+    }
+
+    internal static Frame ReadHistory(Stream input)
+    {
+        Frame frame = Read(input);
+        if (frame == null) return null;
+        Frame source = Read(input);
+        if (source != null && source.Kind == Source && System.Linq.Enumerable.SequenceEqual(frame.Id, source.Id))
+            frame.Source = ReadName(source);
+        return frame;
+    }
+
     internal static Frame Read(Stream input)
     {
         int kind = input.ReadByte();
@@ -177,6 +221,12 @@ internal static class Wire
             case SavedImagePart: valid = count > 0 && count <= PartLimit; break;
             case ImageEnd: valid = count == 0 || count == 4; break;
             case ImageProgress: valid = count == 4; break;
+            case Device:
+            case Source: valid = count > 0 && count <= 256; break;
+            case Roster: valid = count > 0 && count <= 16384; break;
+            case Refresh:
+            case RefreshInventory:
+            case ImageInventory: valid = count >= 0 && count <= 50 * IdSize && count % IdSize == 0; break;
             case ImageAbort:
             case ImagePrepare:
             case ImageReady:
@@ -184,7 +234,6 @@ internal static class Wire
             case Ack: valid = count == 0; break;
             case HistoryText:
             case Text: valid = count > 0 && count <= TextLimit; break;
-            case ImageInventory: valid = count >= 0 && count <= 50 * IdSize && count % IdSize == 0; break;
             case SavedImage:
             case HistoryImage:
             case Image: valid = count > 0 && count <= ImageLimit; break;

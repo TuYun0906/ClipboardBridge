@@ -30,6 +30,43 @@ final class SyncClient implements Closeable {
     private Replay replay;
     private java.util.function.Supplier<byte[]> inventory;
     private boolean replayNeeded;
+    private byte[] refreshInventory;
+    private String deviceName;
+    private Consumer<String> roster;
+    private final java.util.IdentityHashMap<Wire.Frame, Runnable> manualFailures = new java.util.IdentityHashMap<>();
+
+    void configureDevices(String name, Consumer<String> update) {
+        deviceName = name;
+        roster = update;
+    }
+
+    boolean refreshHistory() {
+        synchronized (lock) {
+            if (link == null || link.peerDevice() == null || replay == null) return false;
+            link.enqueueControl(new Wire.Frame(Wire.REFRESH, new byte[Wire.ID_SIZE], new byte[0]));
+            return true;
+        }
+    }
+
+    void submitManual(Wire.Frame frame, Consumer<Boolean> complete) {
+        synchronized (lock) {
+            if (closed || link == null) { complete.accept(false); return; }
+            images.add(frame);
+            confirmations.put(frame, () -> complete.accept(true));
+            manualFailures.put(frame, () -> complete.accept(false));
+            scheduleWrite();
+        }
+    }
+
+    private void dropManual() {
+        manualFailures.forEach((frame, failed) -> {
+            images.remove(frame);
+            confirmations.remove(frame);
+            if (sentImage == frame) sentImage = null;
+            failed.run();
+        });
+        manualFailures.clear();
+    }
 
     void replayWith(Replay replay) { this.replay = replay; }
     void imageInventory(java.util.function.Supplier<byte[]> inventory) { this.inventory = inventory; }
@@ -86,7 +123,7 @@ final class SyncClient implements Closeable {
     private void run() {
         while (!isClosed()) {
             boolean connected = false;
-            try (TlsLink current = TlsLink.connect(host, port, pin, key, inventory)) {
+            try (TlsLink current = TlsLink.connect(host, port, pin, key, inventory, deviceName)) {
                 synchronized (lock) {
                     if (closed) return;
                     link = current;
@@ -96,13 +133,26 @@ final class SyncClient implements Closeable {
                 }
                 connected = true;
                 status.accept(true);
+                if (roster != null && current.peerDevice() == null) roster.accept("旧版设备");
                 for (Wire.Frame frame; (frame = current.read()) != null;) {
                     if (isClosed()) break;
-                    if (frame.kind == Wire.ACK) {
+                    if (frame.kind == Wire.ROSTER && current.peerDevice() != null) {
+                        if (roster != null) roster.accept(new String(frame.data, java.nio.charset.StandardCharsets.UTF_8));
+                    } else if (frame.kind == Wire.REFRESH && current.peerDevice() != null && replay != null) {
+                        byte[] localInventory = inventory.get();
+                        synchronized (lock) {
+                            current.enqueueControl(new Wire.Frame(Wire.REFRESH_INVENTORY, frame.id, localInventory));
+                            refreshInventory = frame.data;
+                            replayNeeded = true;
+                            scheduleWrite();
+                        }
+                    } else if (frame.kind == Wire.ACK) {
                         Runnable delivered = null;
                         synchronized (lock) {
                             if (sentImage != null && Arrays.equals(sentImage.id, frame.id) && !images.isEmpty()) {
-                                delivered = confirmations.remove(images.remove());
+                                Wire.Frame applied = images.remove();
+                                manualFailures.remove(applied);
+                                delivered = confirmations.remove(applied);
                                 sentImage = null;
                                 scheduleWrite();
                             }
@@ -123,8 +173,16 @@ final class SyncClient implements Closeable {
             } catch (IOException | RuntimeException ignored) {
                 // Pending data remains available for the next connection.
             } finally {
-                synchronized (lock) { link = null; history.clear(); }
-                if (connected && !isClosed()) status.accept(false);
+                synchronized (lock) {
+                    link = null;
+                    history.clear();
+                    refreshInventory = null;
+                    dropManual();
+                }
+                if (connected && !isClosed()) {
+                    if (roster != null) roster.accept("");
+                    status.accept(false);
+                }
             }
             try { Thread.sleep(850); }
             catch (InterruptedException stopping) { return; }
@@ -148,6 +206,7 @@ final class SyncClient implements Closeable {
             TlsLink current;
             Wire.Frame frame = null;
             boolean restore = false;
+            byte[] remoteImages = null;
             synchronized (lock) {
                 current = link;
                 if (closed || current == null || (history.isEmpty() && !replayNeeded &&
@@ -157,10 +216,16 @@ final class SyncClient implements Closeable {
                 }
                 if (pending != null && pending != sent) { frame = pending; sent = frame; }
                 else if (!images.isEmpty() && sentImage == null) frame = sentImage = images.peek();
-                else if (replayNeeded) { restore = true; replayNeeded = false; }
+                else if (replayNeeded) {
+                    restore = true;
+                    replayNeeded = false;
+                    remoteImages = refreshInventory;
+                    refreshInventory = null;
+                }
                 else frame = history.remove();
             }
             try {
+                if (remoteImages != null) current.replaceInventory(remoteImages);
                 if (restore) replay.send(entry -> {
                     Wire.Frame urgent;
                     synchronized (lock) {
@@ -189,6 +254,7 @@ final class SyncClient implements Closeable {
             current = link;
             link = null;
             pending = null;
+            dropManual();
             images.clear();
             confirmations.clear();
         }

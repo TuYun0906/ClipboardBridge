@@ -60,6 +60,46 @@ public final class SyncService extends Service {
     private boolean internet;
     private static final String IMAGE_SENT = "发送图片成功";
     private String status = "等待连接";
+    private String roster = "";
+    private String localDeviceName;
+
+    String devices() { return roster; }
+
+    private void updateRoster(Object owner, String value) {
+        main.post(() -> {
+            if (destroyed || currentConnection != owner) return;
+            roster = value;
+            sendBroadcast(new Intent(STATUS).setPackage(getPackageName()));
+        });
+    }
+
+    String refreshHistory() {
+        boolean requested = host != null ? host.refreshHistory() : client != null && client.refreshHistory();
+        return requested ? "已请求刷新在线设备的记录" : "请先连接支持刷新的设备";
+    }
+
+    void sendManual(java.util.List<Object> contents, boolean images) {
+        if (contents.isEmpty()) return;
+        int[] remaining = { contents.size() }, sent = { 0 };
+        java.util.function.Consumer<Boolean> complete = delivered -> main.post(() -> {
+            if (destroyed) return;
+            if (delivered) sent[0]++;
+            if (--remaining[0] != 0) return;
+            String message = !images ? (sent[0] == 1 ? "发送文字成功" : "文字发送失败") :
+                    sent[0] == contents.size() ? "已发送 " + sent[0] + " 张图片" :
+                    "已发送 " + sent[0] + " 张图片，" + (contents.size() - sent[0]) + " 张失败";
+            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show();
+        });
+        for (Object content : contents)
+            if (!worker.post(() -> process(content, true, false, complete))) complete.accept(false);
+    }
+
+    private String readDeviceName() {
+        String configured = null;
+        try { configured = android.provider.Settings.Global.getString(getContentResolver(), "device_name"); }
+        catch (SecurityException ignored) { }
+        return Wire.deviceName(configured == null || configured.trim().isEmpty() ? Build.MODEL : configured);
+    }
     private long lastImageSentAt;
     private ScreenshotBubble screenshot;
     private Object queuedCapture;
@@ -114,6 +154,7 @@ public final class SyncService extends Service {
         super.onCreate();
         running = this;
         prefs = Prefs.get(this);
+        localDeviceName = readDeviceName();
         screenshot = new ScreenshotBubble(this, main);
         clipboard = new AndroidClipboard(this);
         history = new ClipHistory(this);
@@ -294,26 +335,39 @@ public final class SyncService extends Service {
     private void process(Object snapshot, boolean transmit) { process(snapshot, transmit, false); }
 
     private void process(Object snapshot, boolean transmit, boolean confirmCapture) {
+        process(snapshot, transmit, confirmCapture, null);
+    }
+
+    private void process(Object snapshot, boolean transmit, boolean confirmCapture,
+            java.util.function.Consumer<Boolean> manual) {
         try {
-            Wire.Frame frame = clipboard.makeFrame(snapshot, transmit && prefs.getBoolean(Prefs.COMPRESS, false));
+            Wire.Frame frame = clipboard.makeFrame(snapshot, transmit && prefs.getBoolean(Prefs.COMPRESS, false))
+                    .withSource(localDeviceName);
             if (!transmit) { record(frame, true); return; }
             Wire.Frame outgoing = withImageHistory(frame);
             main.post(() -> {
+                if (destroyed) { if (manual != null) manual.accept(false); return; }
                 Runnable delivered = confirmCapture ? () -> main.post(this::showImageSent) : null;
-                if (host != null) host.submit(outgoing, delivered);
+                if (manual != null) {
+                    if (host != null) host.submit(outgoing, () -> manual.accept(true), () -> manual.accept(false));
+                    else if (client != null) client.submitManual(outgoing, manual);
+                    else manual.accept(false);
+                }
+                else if (host != null) host.submit(outgoing, delivered);
                 else if (client != null) client.submit(outgoing, delivered);
                 else android.widget.Toast.makeText(this, hosting ? "Android 主机尚未启动" : "请先填写主机地址和配对码",
                         android.widget.Toast.LENGTH_SHORT).show();
                 worker.post(() -> record(outgoing, true));
             });
-        } catch (IOException error) {
-            main.post(() -> android.widget.Toast.makeText(this, "无法发送此内容", android.widget.Toast.LENGTH_SHORT).show());
+        } catch (IOException | RuntimeException error) {
+            if (manual != null) manual.accept(false);
+            else main.post(() -> android.widget.Toast.makeText(this, "无法发送此内容", android.widget.Toast.LENGTH_SHORT).show());
         }
     }
 
     private Wire.Frame withImageHistory(Wire.Frame frame) {
         return frame.kind == Wire.IMAGE && prefs.getBoolean(ClipHistory.SAVE_IMAGES, false)
-                ? new Wire.Frame(frame.kind, frame.id, frame.data, true) : frame;
+                ? new Wire.Frame(frame.kind, frame.id, frame.data, true).withSource(frame.source) : frame;
     }
 
     boolean capturePeerConnected() {
@@ -323,7 +377,8 @@ public final class SyncService extends Service {
     void sendCapture(Bitmap image, Object request) {
         if (!worker.post(() -> {
             try {
-                Wire.Frame frame = withImageHistory(clipboard.makeFrame(image, prefs.getBoolean(Prefs.COMPRESS, false)));
+                Wire.Frame frame = withImageHistory(clipboard.makeFrame(image, prefs.getBoolean(Prefs.COMPRESS, false)))
+                        .withSource(localDeviceName);
                 main.post(() -> {
                     if (destroyed || !screenshot.isSending(request)) return;
                     if (!capturePeerConnected()) {
@@ -385,6 +440,7 @@ public final class SyncService extends Service {
             if (client != null) client.close();
             client = null;
             currentConnection = null;
+            roster = "";
             if (host != null) host.close();
             host = null;
             endpoint = null;
@@ -425,6 +481,7 @@ public final class SyncService extends Service {
                     hostIdentity = result;
                     currentConnection = connection;
                     host = next;
+                    next.configureDevices(localDeviceName, value -> updateRoster(connection, value));
                     next.start();
                     setStatus("主机已启动，等待连接");
                     updateClipboardWatcher();
@@ -442,7 +499,8 @@ public final class SyncService extends Service {
             clipboard.apply(frame);
             if (frame.kind != Wire.TEXT && !frame.saveImage) return;
         } else if (frame.kind != Wire.DELETE) {
-            entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data);
+            entry = new Wire.Frame(frame.kind == Wire.HISTORY_TEXT ? Wire.TEXT : Wire.IMAGE, frame.id, frame.data)
+                    .withSource(frame.source);
         }
         try {
             java.util.List<Wire.Frame> changes = history.apply(entry, false);
@@ -462,6 +520,8 @@ public final class SyncService extends Service {
             screenshot.sendFailed();
             if (client != null) client.close();
             client = null;
+            currentConnection = null;
+            roster = "";
             endpoint = address;
             token = code;
             internet = publicMode;
@@ -488,6 +548,7 @@ public final class SyncService extends Service {
                 setStatus("正在连接…");
                 client.replayWith(history::replay);
                 client.imageInventory(history::imageInventory);
+                client.configureDevices(localDeviceName, value -> updateRoster(connection, value));
                 client.start();
             }
         }

@@ -14,7 +14,7 @@ internal sealed class ClipHistory
         internal byte Kind;
         internal string ContentKey;
         internal DateTime? CopyTime;
-        internal string CompressionLabel;
+        internal string CompressionLabel, Source;
     }
 
     private readonly string directory;
@@ -57,7 +57,7 @@ internal sealed class ClipHistory
 
     internal static Frame Read(string path)
     {
-        using (var stream = File.OpenRead(path)) return Wire.Read(stream);
+        using (var stream = File.OpenRead(path)) return Wire.ReadHistory(stream);
     }
 
     internal Frame[] Apply(Frame frame, bool local)
@@ -83,12 +83,13 @@ internal sealed class ClipHistory
             string pending = path + ".tmp";
             try
             {
-                using (var stream = File.Create(pending)) Wire.Write(stream, frame);
+                using (var stream = File.Create(pending)) Wire.WriteHistory(stream, frame);
                 File.Move(pending, path);
             }
             finally { File.Delete(pending); }
             entries.Add(key, entry);
-            changes.Add(new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data));
+            changes.Add(new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data)
+                .WithSource(frame.Source));
             if (duplicate != null && Delete(duplicate.Key)) changes.Add(Tombstone(duplicate.Key));
             if (entry.Kind == Wire.Image) changes.AddRange(TrimImages());
             return changes.ToArray();
@@ -107,7 +108,7 @@ internal sealed class ClipHistory
             Array.Copy(removal.Id, id, 6);
             string editedKey = Key(id);
             if (entries.ContainsKey(editedKey) || deleted.Contains(editedKey)) throw new IOException("无法生成编辑记录");
-            var edited = new Frame(Wire.Text, id, replacement.Data);
+            var edited = new Frame(Wire.Text, id, replacement.Data).WithSource(previous.Source);
             var changes = new List<Frame>(Apply(edited, true));
             if (Delete(key)) changes.Insert(0, removal);
             return changes.ToArray();
@@ -141,7 +142,7 @@ internal sealed class ClipHistory
         {
             Frame frame;
             lock (entries) frame = entries.ContainsKey(entry.Key) ? Read(entry.Path) : null;
-            if (frame != null) yield return new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data);
+            if (frame != null) yield return new Frame(frame.Kind == Wire.Text ? Wire.HistoryText : Wire.HistoryImage, frame.Id, frame.Data).WithSource(frame.Source);
         }
     }
 
@@ -179,7 +180,7 @@ internal sealed class ClipHistory
         return new Entry
         {
             Path = path, Key = key, Text = text, Label = label, Kind = frame.Kind,
-            ContentKey = contentKey,
+            ContentKey = contentKey, Source = frame.Source,
             CompressionLabel = frame.Kind == Wire.Image ? Wire.CompressionLabel(frame.Id, frame.Data.Length) : null,
             CopyTime = stamp.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(stamp.Value).LocalDateTime : (DateTime?)null
         };

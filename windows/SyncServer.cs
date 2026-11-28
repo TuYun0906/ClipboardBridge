@@ -26,6 +26,46 @@ internal sealed class SyncServer : ISyncConnection
     private readonly HashSet<string> applied = new HashSet<string>();
     private bool closed;
     private int connected;
+    private string deviceName;
+    private Action<string> roster;
+
+    internal void ConfigureDevices(string name, Action<string> update)
+    {
+        deviceName = name;
+        roster = update;
+        update(name);
+    }
+
+    private void PublishRoster()
+    {
+        if (roster == null || closed) return;
+        string list = string.Join("\n", new[] { deviceName }.Concat(peers.Where(peer => peer.Link != null)
+            .Select(peer => peer.Link.PeerDevice ?? "旧版设备").OrderBy(name => name, StringComparer.Ordinal)));
+        roster(list);
+        var frame = new Frame(Wire.Roster, new byte[Wire.IdSize], System.Text.Encoding.UTF8.GetBytes(list));
+        foreach (Peer peer in peers)
+            if (peer.Link != null && peer.Link.PeerDevice != null) peer.Link.EnqueueControl(frame);
+    }
+
+    public bool RefreshHistory()
+    {
+        lock (gate)
+        {
+            if (closed || connected == 0 || replay == null) return false;
+            var frame = new Frame(Wire.Refresh, new byte[Wire.IdSize], inventory == null ? new byte[0] : inventory());
+            foreach (Peer peer in peers)
+            {
+                if (peer.Link == null) continue;
+                if (peer.Link.PeerDevice != null) peer.Link.EnqueueControl(frame);
+                else
+                {
+                    peer.ReplayNeeded = true;
+                    ScheduleWrite(peer);
+                }
+            }
+            return true;
+        }
+    }
     private Frame pending;
     private readonly Queue<Frame> waitingImages = new Queue<Frame>();
 
@@ -37,6 +77,8 @@ internal sealed class SyncServer : ISyncConnection
         internal TlsLink Link;
         internal Frame Pending, Sent;
         internal bool Writing, ReplayNeeded;
+        internal byte[] RefreshInventory;
+        internal readonly Dictionary<string, Frame> Confirmations = new Dictionary<string, Frame>();
 
         internal Peer(TcpClient socket) { Socket = socket; }
     }
@@ -97,13 +139,14 @@ internal sealed class SyncServer : ISyncConnection
     {
         lock (gate)
         {
-            if (closed) return;
-            if (frame.Kind != Wire.Image) pending = origin == null ? frame : null;
+            if (closed || (frame.Completion != null && connected == 0)) { frame.Complete(false); return; }
+            bool queued = frame.Kind == Wire.Image || frame.Completion != null;
+            if (!queued) pending = origin == null ? frame : null;
             else if (origin == null && connected == 0) waitingImages.Enqueue(frame);
             foreach (Peer peer in peers)
             {
                 if (peer.Link == null || peer == origin) continue;
-                if (frame.Kind == Wire.Image) peer.Images.Enqueue(frame);
+                if (queued) peer.Images.Enqueue(frame);
                 else peer.Pending = frame;
                 ScheduleWrite(peer);
             }
@@ -138,7 +181,7 @@ internal sealed class SyncServer : ISyncConnection
     {
         try
         {
-            using (TlsLink link = TlsLink.Accept(peer.Socket, identity.Certificate, identity.Key, inventory))
+            using (TlsLink link = TlsLink.Accept(peer.Socket, identity.Certificate, identity.Key, inventory, deviceName))
             {
                 lock (gate)
                 {
@@ -149,22 +192,41 @@ internal sealed class SyncServer : ISyncConnection
                     peer.ReplayNeeded = replay != null;
                     ScheduleWrite(peer);
                     if (++connected == 1) status(true);
+                    PublishRoster();
                 }
                 Action<Frame> relay = change => Publish(change, change.Kind == Wire.Delete ? null : peer);
                 for (Frame frame; (frame = link.Read()) != null;)
                 {
-                    if (frame.Kind == Wire.Ack)
+                    if (frame.Kind == Wire.Refresh && link.PeerDevice != null) RefreshHistory();
+                    else if (frame.Kind == Wire.RefreshInventory && link.PeerDevice != null && replay != null)
                     {
                         lock (gate)
                         {
-                            if (peer.Sent == null || !peer.Sent.Id.SequenceEqual(frame.Id)) continue;
-                            if (peer.Pending == peer.Sent) peer.Pending = null;
-                            if (pending == peer.Sent) pending = null;
+                            peer.RefreshInventory = frame.Data;
+                            peer.ReplayNeeded = true;
+                            ScheduleWrite(peer);
+                        }
+                    }
+                    else if (frame.Kind == Wire.Ack)
+                    {
+                        Frame delivered;
+                        lock (gate)
+                        {
+                            string id = Convert.ToBase64String(frame.Id);
+                            peer.Confirmations.TryGetValue(id, out delivered);
+                            peer.Confirmations.Remove(id);
+                            if (peer.Sent != null && peer.Sent.Id.SequenceEqual(frame.Id))
+                            {
+                                if (peer.Pending == peer.Sent) peer.Pending = null;
+                                if (pending == peer.Sent) pending = null;
+                            }
+                            if (delivered != null) delivered.Complete(true);
                         }
                     }
                     else if (frame.Kind >= Wire.HistoryText && frame.Kind <= Wire.Delete) receive(frame, relay);
                     else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
                     {
+                        frame.Source = link.PeerDevice;
                         try { ApplyClipboard(frame, peer, relay); }
                         catch (ExpiredImageException) { continue; }
                         link.Acknowledge(frame.Id);
@@ -184,10 +246,21 @@ internal sealed class SyncServer : ISyncConnection
             lock (gate)
             {
                 peers.Remove(peer);
-                if (peer.Link != null && --connected == 0 && !closed) status(false);
-                peer.Link = null;
+                if (peer.Link != null)
+                {
+                    peer.Link = null;
+                    if (--connected == 0 && !closed) status(false);
+                    PublishRoster();
+                }
+                foreach (Frame frame in peer.Images.Concat(peer.Confirmations.Values))
+                {
+                    if (frame.Completion != null && !peers.Any(other =>
+                        other.Images.Contains(frame) || other.Confirmations.ContainsValue(frame)))
+                        frame.Complete(false);
+                }
                 peer.History.Clear();
                 peer.Images.Clear();
+                peer.Confirmations.Clear();
             }
         }
     }
@@ -214,6 +287,13 @@ internal sealed class SyncServer : ISyncConnection
         ThreadPool.QueueUserWorkItem(delegate { WriteLatest(peer); });
     }
 
+    private static Frame TakeDelivery(Peer peer)
+    {
+        Frame frame = peer.Images.Dequeue();
+        if (frame.Completion != null) peer.Confirmations[Convert.ToBase64String(frame.Id)] = frame;
+        return frame;
+    }
+
     private void WriteLatest(Peer peer)
     {
         try
@@ -222,6 +302,7 @@ internal sealed class SyncServer : ISyncConnection
             {
                 TlsLink link;
                 Frame frame = null;
+                byte[] remoteImages = null;
                 lock (gate)
                 {
                     link = peer.Link;
@@ -232,10 +313,16 @@ internal sealed class SyncServer : ISyncConnection
                         return;
                     }
                     if (peer.Pending != null && peer.Pending != peer.Sent) frame = peer.Sent = peer.Pending;
-                    else if (peer.Images.Count > 0) frame = peer.Images.Dequeue();
-                    else if (peer.ReplayNeeded) peer.ReplayNeeded = false;
+                    else if (peer.Images.Count > 0) frame = TakeDelivery(peer);
+                    else if (peer.ReplayNeeded)
+                    {
+                        peer.ReplayNeeded = false;
+                        remoteImages = peer.RefreshInventory;
+                        peer.RefreshInventory = null;
+                    }
                     else frame = peer.History.Dequeue();
                 }
+                if (remoteImages != null) link.ReplaceInventory(remoteImages);
                 if (frame == null)
                     foreach (Frame entry in replay())
                     {
@@ -243,7 +330,7 @@ internal sealed class SyncServer : ISyncConnection
                         lock (gate)
                         {
                             if (peer.Link != link) throw new IOException("Connection changed");
-                            urgent = peer.Images.Count > 0 ? peer.Images.Dequeue() : null;
+                            urgent = peer.Images.Count > 0 ? TakeDelivery(peer) : null;
                         }
                         if (urgent != null) link.Send(urgent);
                         link.Send(entry);

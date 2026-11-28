@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
                 return;
             }
             refreshStatus();
+            if (refreshDeviceList != null) refreshDeviceList.run();
             captureFocused();
         }
     };
@@ -147,6 +148,13 @@ public final class MainActivity extends Activity {
         equal(sending, Style.action(this, "选择图片", false, this::selectImage));
         equal(sending, Style.action(this, "历史记录", false, this::showHistory));
         add(root, sending, 20, dp(48));
+        LinearLayout devices = new LinearLayout(this);
+        equal(devices, Style.action(this, "在线设备", false, this::showDevices));
+        equal(devices, Style.action(this, "刷新记录", false, () -> {
+            SyncService service = SyncService.running;
+            Toast.makeText(this, service == null ? "同步服务正在启动" : service.refreshHistory(), Toast.LENGTH_SHORT).show();
+        }));
+        add(root, devices, 8, dp(46));
 
         LinearLayout connection = card(root, "连接");
         boolean isHost = prefs.getBoolean(Prefs.HOST, false);
@@ -363,7 +371,7 @@ public final class MainActivity extends Activity {
         dialogActions(body, dialog, "取消", "发送", () -> {
             String text = entry.getText().toString();
             if (text.isEmpty()) { entry.setError("请输入文字"); return; }
-            submit(text);
+            submit(java.util.Collections.singletonList(text), false);
             dialog.dismiss();
         });
         showDialog(dialog, body);
@@ -392,19 +400,50 @@ public final class MainActivity extends Activity {
         }
         if (code != IMAGE || result != RESULT_OK || data == null) return;
         android.content.ClipData selection = data.getClipData();
+        java.util.List<Object> images = new java.util.ArrayList<>();
         if (selection == null) {
-            if (data.getData() != null) submit(data.getData());
+            if (data.getData() != null) images.add(data.getData());
         } else {
             for (int i = 0; i < selection.getItemCount(); i++) {
                 Uri image = selection.getItemAt(i).getUri();
-                if (image != null) submit(image);
+                if (image != null) images.add(image);
             }
         }
+        submit(images, true);
     }
 
-    private void submit(Object content) {
+    private Runnable refreshDeviceList;
+
+    private void showDevices() {
+        LinearLayout body = dialogBody("在线设备");
+        LinearLayout list = Style.column(this);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        add(body, scroll, 4, Math.min(dp(280), getResources().getDisplayMetrics().heightPixels / 3));
+        Runnable refresh = () -> {
+            SyncService service = SyncService.running;
+            String devices = service == null ? "" : service.devices();
+            list.removeAllViews();
+            if (devices.isEmpty()) {
+                add(list, Style.label(this, "暂无连接", 15, Style.MUTED, false), 6, -2);
+                return;
+            }
+            String[] names = devices.split("\n");
+            for (int i = 0; i < names.length; i++)
+                add(list, Style.label(this, names[i] + (i == 0 ? "（主机）" : ""), 15,
+                        i == 0 ? Style.BLUE : Style.INK, i == 0), 8, -2);
+        };
+        refreshDeviceList = refresh;
+        refresh.run();
+        Dialog dialog = appDialog(body);
+        dialog.setOnDismissListener(ignored -> { if (refreshDeviceList == refresh) refreshDeviceList = null; });
+        add(body, Style.action(this, "关闭", false, dialog::dismiss), 16, dp(44));
+        showDialog(dialog, body);
+    }
+
+    private void submit(java.util.List<Object> contents, boolean images) {
         SyncService service = SyncService.running;
-        if (service != null) service.send(content);
+        if (service != null) service.sendManual(contents, images);
         else Toast.makeText(this, "同步服务正在启动", Toast.LENGTH_SHORT).show();
     }
 
@@ -564,6 +603,8 @@ public final class MainActivity extends Activity {
                     add(card, Style.label(this, compression, 12, Style.BLUE, false), 5, -2);
                 }
                 add(card, Style.label(this, timeLabel, 12, Style.MUTED, false), 5, -2);
+                add(card, Style.label(this, "来自 " + (entry.source == null ? "未知设备" : entry.source),
+                        12, Style.MUTED, false), 2, -2);
                 card.setOnClickListener(view -> {
                     if (!selected.isEmpty()) {
                         if (!selected.remove(entry.key)) selected.add(entry.key);

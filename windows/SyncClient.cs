@@ -10,6 +10,7 @@ using System.Threading;
 internal interface ISyncConnection : IDisposable
 {
     void Submit(Frame frame);
+    bool RefreshHistory();
     void Publish(Frame frame);
 }
 
@@ -24,6 +25,39 @@ internal sealed class SyncClient : ISyncConnection
     private readonly Func<byte[]> inventory;
     private readonly Queue<Frame> history = new Queue<Frame>();
     private bool closed, writing, replayNeeded;
+    private byte[] refreshInventory;
+    private string deviceName;
+    private Action<string> roster;
+
+    internal void ConfigureDevices(string name, Action<string> update)
+    {
+        deviceName = name;
+        roster = update;
+    }
+
+    public bool RefreshHistory()
+    {
+        lock (gate)
+        {
+            if (link == null || link.PeerDevice == null) return false;
+            link.EnqueueControl(new Frame(Wire.Refresh, new byte[Wire.IdSize], new byte[0]));
+            return true;
+        }
+    }
+
+    private void DropManual()
+    {
+        for (int left = images.Count; left > 0; left--)
+        {
+            Frame frame = images.Dequeue();
+            if (frame.Completion == null) images.Enqueue(frame);
+            else
+            {
+                if (sentImage == frame) sentImage = null;
+                frame.Complete(false);
+            }
+        }
+    }
     private TcpClient socket;
     private TlsLink link;
     private Frame pending, sent;
@@ -72,8 +106,8 @@ internal sealed class SyncClient : ISyncConnection
     {
         lock (gate)
         {
-            if (closed) return;
-            if (frame.Kind == Wire.Image) images.Enqueue(frame);
+            if (closed || (frame.Completion != null && link == null)) { frame.Complete(false); return; }
+            if (frame.Kind == Wire.Image || frame.Completion != null) images.Enqueue(frame);
             else pending = frame;
             ScheduleWrite();
         }
@@ -104,7 +138,7 @@ internal sealed class SyncClient : ISyncConnection
             try
             {
                 int port = endpoint.IsDefaultPort ? 47832 : endpoint.Port;
-                using (var current = TlsLink.Connect(connecting, endpoint.DnsSafeHost, port, pin, key, inventory))
+                using (var current = TlsLink.Connect(connecting, endpoint.DnsSafeHost, port, pin, key, inventory, deviceName))
                 {
                     lock (gate)
                     {
@@ -115,22 +149,40 @@ internal sealed class SyncClient : ISyncConnection
                         ScheduleWrite();
                     }
                     status(true);
+                    if (roster != null && current.PeerDevice == null) roster("旧版设备");
                     for (Frame frame; (frame = current.Read()) != null;)
                     {
-                        if (frame.Kind == Wire.Ack)
+                        if (frame.Kind == Wire.Roster && current.PeerDevice != null)
                         {
+                            if (roster != null) roster(System.Text.Encoding.UTF8.GetString(frame.Data));
+                        }
+                        else if (frame.Kind == Wire.Refresh && current.PeerDevice != null)
+                        {
+                            byte[] local = inventory();
+                            lock (gate)
+                            {
+                                current.EnqueueControl(new Frame(Wire.RefreshInventory, frame.Id, local));
+                                refreshInventory = frame.Data;
+                                replayNeeded = true;
+                                ScheduleWrite();
+                            }
+                        }
+                        else if (frame.Kind == Wire.Ack)
+                        {
+                            Frame delivered = null;
                             lock (gate)
                             {
                                 if (sentImage != null && sentImage.Id.SequenceEqual(frame.Id) && images.Count > 0)
                                 {
-                                    images.Dequeue();
+                                    delivered = images.Dequeue();
                                     sentImage = null;
                                     ScheduleWrite();
                                 }
                                 if (pending != null && pending.Id.SequenceEqual(frame.Id)) pending = null;
                             }
+                            if (delivered != null) delivered.Complete(true);
                         }
-                        else if (frame.Kind >= Wire.HistoryText) receive(frame, Publish);
+                        else if (frame.Kind >= Wire.HistoryText && frame.Kind <= Wire.Delete) receive(frame, Publish);
                         else if (frame.Kind == Wire.Text || frame.Kind == Wire.Image)
                         {
                             if (lastReceived == null || !lastReceived.SequenceEqual(frame.Id))
@@ -158,11 +210,14 @@ internal sealed class SyncClient : ISyncConnection
                     link = null;
                     socket = null;
                     history.Clear();
+                    refreshInventory = null;
+                    DropManual();
                 }
             }
             lock (gate)
             {
                 if (closed) return;
+                if (roster != null) roster("");
                 status(false);
                 Monitor.Wait(gate, 850);
             }
@@ -181,6 +236,7 @@ internal sealed class SyncClient : ISyncConnection
         while (true)
         {
             Frame frame;
+            byte[] remoteImages = null;
             TlsLink current;
             lock (gate)
             {
@@ -194,11 +250,18 @@ internal sealed class SyncClient : ISyncConnection
                 }
                 if (pending != null && pending != sent) frame = sent = pending;
                 else if (nextImage) frame = sentImage = images.Peek();
-                else if (replayNeeded) { replayNeeded = false; frame = null; }
+                else if (replayNeeded)
+                {
+                    replayNeeded = false;
+                    frame = null;
+                    remoteImages = refreshInventory;
+                    refreshInventory = null;
+                }
                 else frame = history.Dequeue();
             }
             try
             {
+                if (remoteImages != null) current.ReplaceInventory(remoteImages);
                 if (frame != null) current.Send(frame);
                 else foreach (var entry in replay())
                 {
@@ -232,6 +295,7 @@ internal sealed class SyncClient : ISyncConnection
         lock (gate)
         {
             closed = true;
+            DropManual();
             images.Clear();
             link = null;
             if (socket != null) socket.Close();

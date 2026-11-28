@@ -35,9 +35,16 @@ internal static class AndroidHostCheck
         using (var client = new SyncClient(new Uri("tcp://127.0.0.1:" + port), pair,
             (frame, publish) => received.Add(frame), connected => {}, () => new Frame[0], () => Make(Wire.Image, 9, "").Id))
         {
+            client.ConfigureDevices("Windows 客户端", names => { });
             client.Start();
             Check(received, Wire.HistoryText, "host history");
-            client.Submit(Make(Wire.Text, 1, "Windows copy"));
+            if (!client.RefreshHistory()) throw new Exception("Android host refresh request was rejected");
+            Check(received, Wire.HistoryText, "host history");
+            var manualText = Make(Wire.Text, 1, "Windows copy");
+            var textAck = new System.Threading.ManualResetEventSlim();
+            bool textDelivered = false;
+            manualText.Completion = success => { textDelivered = success; textAck.Set(); };
+            client.Submit(manualText);
             for (byte i = 11; i <= 13; i++)
             {
                 Frame image = Make(Wire.Image, i, "image " + i);
@@ -45,6 +52,7 @@ internal static class AndroidHostCheck
                 if (i == 12) Wire.MarkCompressed(image.Id, 70, 100);
                 client.Submit(image);
             }
+            if (!textAck.Wait(5000) || !textDelivered) throw new Exception("Missing Windows client manual text ACK");
             for (int i = 21; i <= 23; i++) Check(received, Wire.Image, "host image " + i);
             client.Publish(Make(Wire.Delete, 8, ""));
             Check(received, Wire.Text, "Android copy");
@@ -70,6 +78,7 @@ internal static class AndroidHostCheck
             if (!received.TryTake(out frame, 8000)) throw new Exception("Missing frame " + kind + ": " + text);
         } while (frame.Kind == Wire.Delete);
         if (frame.Kind != kind || Encoding.UTF8.GetString(frame.Data) != text ||
+            (kind == Wire.Image && frame.Source != "Android 主机") ||
             (kind == Wire.Image && frame.SaveImage != (text == "host image 21")) ||
             (kind == Wire.Image && Wire.CompressionPercent(frame.Id) != (text == "host image 22" ? 70 : -1)))
             throw new Exception("Expected " + text + "; got " + frame.Kind + ": " + Encoding.UTF8.GetString(frame.Data));

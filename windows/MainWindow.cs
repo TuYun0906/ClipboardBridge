@@ -46,7 +46,8 @@ internal sealed class MainWindow : Window
 
     internal void RefreshStatus()
     {
-        if (status != null) status.Text = program.Status ?? "等待连接";
+        if (status != null) status.Text = (program.Status ?? "等待连接") +
+            (String.IsNullOrEmpty(program.Feedback) ? "" : " · " + program.Feedback);
     }
 
     private Border Panel()
@@ -63,6 +64,13 @@ internal sealed class MainWindow : Window
         help.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(help, Dock.Right);
         statusRow.Children.Add(help);
+        var devices = Action("在线设备", false, ShowDevices);
+        devices.Width = 82;
+        devices.Height = 32;
+        devices.Margin = new Thickness(0, 0, 7, 0);
+        devices.VerticalAlignment = VerticalAlignment.Top;
+        DockPanel.SetDock(devices, Dock.Right);
+        statusRow.Children.Add(devices);
         var identity = new StackPanel();
         identity.Children.Add(Label("跨设备剪贴板", 24, Ink, true));
         status.Margin = new Thickness(0, 5, 0, 0);
@@ -101,6 +109,12 @@ internal sealed class MainWindow : Window
         type.ToolTip = "点击切换历史类型";
         DockPanel.SetDock(type, Dock.Right);
         searchRow.Children.Add(type);
+        var sync = Action("刷新记录", false, program.RefreshHistory);
+        sync.Width = 78;
+        sync.Height = 34;
+        sync.Margin = new Thickness(8, 0, 0, 0);
+        DockPanel.SetDock(sync, Dock.Right);
+        searchRow.Children.Add(sync);
         var search = new TextBox { Height = 34, Padding = new Thickness(8, 4, 8, 4),
             VerticalContentAlignment = VerticalAlignment.Center, BorderThickness = new Thickness(0),
             Background = Brushes.Transparent, Foreground = Ink, ToolTip = "搜索历史文字或图片" };
@@ -184,7 +198,7 @@ internal sealed class MainWindow : Window
             }
             foreach (var entry in matches.Skip(page * pageSize).Take(pageSize))
             {
-                var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 48 };
+                var row = new DockPanel { LastChildFill = true, Margin = new Thickness(3), Height = 64 };
                 var copy = Action("复制", false, () => program.CopyHistory(entry.Path));
                 copy.Width = 62;
                 var delete = Action("删除", false, () => program.DeleteHistory(entry.Key));
@@ -198,7 +212,7 @@ internal sealed class MainWindow : Window
                     VerticalAlignment = VerticalAlignment.Center };
                 if (entry.Kind == Wire.Image)
                 {
-                    row.Height = entry.CompressionLabel != null ? 99 : 82;
+                    row.Height = entry.CompressionLabel != null ? 115 : 98;
                     copy.Height = delete.Height = 36;
                     AddHistoryImage(details, entry.Path);
                 }
@@ -216,6 +230,7 @@ internal sealed class MainWindow : Window
                 var time = Label(timestamp, 12, Muted, false);
                 time.Margin = new Thickness(0, 3, 0, 0);
                 details.Children.Add(time);
+                details.Children.Add(Label("来自 " + (entry.Source ?? "未知设备"), 12, Muted, false));
                 row.Children.Add(details);
                 var item = new ListBoxItem { Content = row, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                     Margin = new Thickness(0, 0, 0, 6), Template = HistoryItemTemplate };
@@ -622,6 +637,39 @@ internal sealed class MainWindow : Window
         dialog.ShowDialog();
     }
 
+    private void ShowDevices()
+    {
+        var dialog = Dialog("在线设备", 360);
+        var body = DialogBody();
+        var list = new StackPanel();
+        Action refresh = () =>
+        {
+            list.Children.Clear();
+            if (String.IsNullOrEmpty(program.Devices))
+            {
+                list.Children.Add(Label("暂无连接", 14, Muted, false));
+                return;
+            }
+            var names = program.Devices.Split('\n');
+            for (int i = 0; i < names.Length; i++)
+            {
+                var item = Label(names[i] + (i == 0 ? "（主机）" : ""), 14, i == 0 ? Blue : Ink, i == 0);
+                item.Margin = new Thickness(0, 0, 0, 9);
+                list.Children.Add(item);
+            }
+        };
+        refresh();
+        program.DevicesChanged += refresh;
+        dialog.Closed += (sender, args) => program.DevicesChanged -= refresh;
+        body.Children.Add(new ScrollViewer { Content = list, MaxHeight = 350,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        var close = Action("关闭", false, dialog.Close);
+        close.Margin = new Thickness(0, 12, 0, 0);
+        body.Children.Add(close);
+        dialog.Content = body;
+        dialog.ShowDialog();
+    }
+
     private void SendText()
     {
         var dialog = Dialog("发送文字", 410);
@@ -654,7 +702,7 @@ internal sealed class MainWindow : Window
             Multiselect = true
         };
         if (dialog.ShowDialog(this) == true)
-            foreach (string path in dialog.FileNames) program.Send(new FileInfo(path));
+            program.SendMany(dialog.FileNames.Select(path => (object)new FileInfo(path)).ToArray(), true);
     }
 
     private Window Dialog(string title, double width)

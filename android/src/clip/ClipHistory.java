@@ -67,7 +67,7 @@ final class ClipHistory {
         ensureFolder();
         File pending = new File(file.getPath() + ".tmp");
         try {
-            try (OutputStream out = Files.newOutputStream(pending.toPath())) { Wire.write(out, frame); }
+            try (OutputStream out = Files.newOutputStream(pending.toPath())) { Wire.writeHistory(out, frame); }
             Files.move(pending.toPath(), file.toPath());
         } finally { pending.delete(); }
         records.put(key, incoming);
@@ -88,7 +88,7 @@ final class ClipHistory {
         String replacementKey = key(id);
         if (deleted.contains(replacementKey) || records.containsKey(replacementKey))
             throw new IOException("Duplicate history ID");
-        List<Wire.Frame> changes = apply(new Wire.Frame(Wire.TEXT, id, replacement.data), true);
+        List<Wire.Frame> changes = apply(new Wire.Frame(Wire.TEXT, id, replacement.data).withSource(previous.source), true);
         if (delete(key)) changes.add(0, removal);
         return changes;
     }
@@ -153,7 +153,7 @@ final class ClipHistory {
 
     static Wire.Frame read(File file) throws IOException {
         try (InputStream in = Files.newInputStream(file.toPath())) {
-            Wire.Frame frame = Wire.read(in);
+            Wire.Frame frame = Wire.readHistory(in);
             if (frame == null) throw new IOException("Empty history entry");
             return frame;
         }
@@ -185,7 +185,7 @@ final class ClipHistory {
     }
 
     private static Wire.Frame asHistory(Wire.Frame frame) {
-        return new Wire.Frame(frame.kind == Wire.TEXT ? Wire.HISTORY_TEXT : Wire.HISTORY_IMAGE, frame.id, frame.data);
+        return new Wire.Frame(frame.kind == Wire.TEXT ? Wire.HISTORY_TEXT : Wire.HISTORY_IMAGE, frame.id, frame.data).withSource(frame.source);
     }
 
     static final class Entry {
@@ -193,11 +193,12 @@ final class ClipHistory {
         final String key, text, contentKey;
         final int kind;
         final long copiedAt;
-        final String compressionLabel;
+        final String compressionLabel, source;
         Entry(File file, String key, Wire.Frame frame) {
             this.file = file;
             this.key = key;
             kind = frame.kind;
+            source = frame.source;
             copiedAt = copyTime(key);
             compressionLabel = kind == Wire.IMAGE ? Wire.compressionLabel(frame.id, frame.data.length) : null;
             text = kind == Wire.TEXT ? new String(frame.data, StandardCharsets.UTF_8) : "图片";

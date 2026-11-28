@@ -17,15 +17,18 @@ public final class ProtocolCheck {
         if (args[0].equals("write")) {
             try (OutputStream out = Files.newOutputStream(path)) {
                 Wire.write(out, new Wire.Frame(Wire.TEXT, id, text));
-                Wire.write(out, new Wire.Frame(Wire.IMAGE, imageId, image));
+                Wire.Frame photo = new Wire.Frame(Wire.IMAGE, imageId, image);
+                photo.source = "手机 A";
+                Wire.writeHistory(out, photo);
                 Wire.write(out, new Wire.Frame(Wire.ACK, id, new byte[0]));
             }
             return;
         }
         try (InputStream in = Files.newInputStream(path)) {
             check(Wire.read(in), Wire.TEXT, id, text);
-            Wire.Frame received = Wire.read(in);
+            Wire.Frame received = Wire.readHistory(in);
             check(received, Wire.IMAGE, imageId, image);
+            if (!"手机 A".equals(received.source)) throw new AssertionError("Missing image source");
             if (!"已压缩至原31.58%".equals(Wire.compressionLabel(received.id, received.data.length)))
                 throw new AssertionError("Incorrect compression ratio");
             check(Wire.read(in), Wire.ACK, id, new byte[0]);

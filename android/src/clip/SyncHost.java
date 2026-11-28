@@ -22,6 +22,44 @@ final class SyncHost implements Closeable {
     private final Consumer<Boolean> status;
     private final SyncClient.Replay replay;
     private java.util.function.Supplier<byte[]> inventory;
+    private String deviceName;
+    private Consumer<String> roster;
+
+    void configureDevices(String name, Consumer<String> update) {
+        deviceName = name;
+        roster = update;
+        update.accept(name);
+    }
+
+    private void publishRoster() {
+        if (roster == null || closed) return;
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (Peer peer : peers) if (peer.link != null)
+            names.add(peer.link.peerDevice() != null ? peer.link.peerDevice() : "旧版设备");
+        java.util.Collections.sort(names);
+        names.add(0, deviceName);
+        String list = String.join("\n", names);
+        roster.accept(list);
+        Wire.Frame frame = new Wire.Frame(Wire.ROSTER, new byte[Wire.ID_SIZE],
+                list.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        for (Peer peer : peers) if (peer.link != null && peer.link.peerDevice() != null)
+            peer.link.enqueueControl(frame);
+    }
+
+    synchronized boolean refreshHistory() {
+        if (closed || connected == 0 || replay == null) return false;
+        Wire.Frame request = new Wire.Frame(Wire.REFRESH, new byte[Wire.ID_SIZE],
+                inventory != null ? inventory.get() : new byte[0]);
+        for (Peer peer : peers) {
+            if (peer.link == null) continue;
+            if (peer.link.peerDevice() != null) peer.link.enqueueControl(request);
+            else {
+                peer.restore = true;
+                schedule(peer);
+            }
+        }
+        return true;
+    }
     private final byte[] key;
     private final Set<Peer> peers = new HashSet<>();
     private final Set<String> applied = new LinkedHashSet<>();
@@ -48,6 +86,7 @@ final class SyncHost implements Closeable {
         TlsLink link;
         Wire.Frame pending, sent;
         boolean writing, restore;
+        byte[] refreshInventory;
         Peer(Socket socket) { this.socket = socket; }
     }
 
@@ -71,8 +110,9 @@ final class SyncHost implements Closeable {
     synchronized void publish(Wire.Frame frame) { publish(frame, null); }
 
     private synchronized void submit(Wire.Frame frame, Peer origin, Runnable delivered, Runnable failed) {
-        if (closed) return;
-        ImageDelivery image = frame.kind == Wire.IMAGE ? new ImageDelivery(frame, delivered, failed) : null;
+        if (closed) { if (failed != null) failed.run(); return; }
+        ImageDelivery image = frame.kind == Wire.IMAGE || delivered != null
+                ? new ImageDelivery(frame, delivered, failed) : null;
         if (image == null) pending = origin == null ? frame : null;
         else if (origin == null && connected == 0) {
             if (failed != null) failed.run();
@@ -127,7 +167,7 @@ final class SyncHost implements Closeable {
     }
 
     private void read(Peer peer) {
-        try (TlsLink link = TlsLink.accept(peer.socket, tls, key, inventory)) {
+        try (TlsLink link = TlsLink.accept(peer.socket, tls, key, inventory, deviceName)) {
             synchronized (this) {
                 if (closed) return;
                 peer.link = link;
@@ -137,10 +177,19 @@ final class SyncHost implements Closeable {
                 waitingImages.clear();
                 schedule(peer);
                 if (++connected == 1) status.accept(true);
+                publishRoster();
             }
 
             for (Wire.Frame frame; (frame = link.read()) != null;) {
-                if (frame.kind == Wire.ACK) {
+                if (frame.kind == Wire.REFRESH && link.peerDevice() != null) {
+                    refreshHistory();
+                } else if (frame.kind == Wire.REFRESH_INVENTORY && link.peerDevice() != null && replay != null) {
+                    synchronized (this) {
+                        peer.refreshInventory = frame.data;
+                        peer.restore = true;
+                        schedule(peer);
+                    }
+                } else if (frame.kind == Wire.ACK) {
                     Runnable delivered = null;
                     synchronized (this) {
                         if (peer.sentImage != null && Arrays.equals(peer.sentImage.frame.id, frame.id)) {
@@ -160,6 +209,7 @@ final class SyncHost implements Closeable {
                 } else if (frame.kind >= Wire.HISTORY_TEXT && frame.kind <= Wire.DELETE) {
                     receiver.apply(frame, change -> publish(change, change.kind == Wire.DELETE ? null : peer));
                 } else if (frame.kind == Wire.TEXT || frame.kind == Wire.IMAGE) {
+                    frame.source = link.peerDevice();
                     try { applyClipboard(frame, peer); }
                     catch (Wire.ExpiredImage expired) { continue; }
                     link.acknowledge(frame.id);
@@ -171,8 +221,11 @@ final class SyncHost implements Closeable {
             closeSocket(peer);
             synchronized (this) {
                 peers.remove(peer);
-                if (peer.link != null && --connected == 0 && !closed) status.accept(false);
-                peer.link = null;
+                if (peer.link != null) {
+                    peer.link = null;
+                    if (--connected == 0 && !closed) status.accept(false);
+                    publishRoster();
+                }
                 peer.history.clear();
                 for (ImageDelivery image : peer.images) {
                     if (image.failure != null && peers.stream().noneMatch(other -> other.images.contains(image))) {
@@ -213,6 +266,7 @@ final class SyncHost implements Closeable {
             for (;;) {
                 TlsLink link;
                 Wire.Frame frame = null;
+                byte[] remoteImages = null;
                 synchronized (this) {
                     link = peer.link;
                     boolean nextImage = !peer.images.isEmpty() && peer.sentImage == null;
@@ -226,9 +280,14 @@ final class SyncHost implements Closeable {
                         peer.sentImage = peer.images.peek();
                         frame = peer.sentImage.frame;
                     }
-                    else if (peer.restore) peer.restore = false;
+                    else if (peer.restore) {
+                        peer.restore = false;
+                        remoteImages = peer.refreshInventory;
+                        peer.refreshInventory = null;
+                    }
                     else frame = peer.history.remove();
                 }
+                if (remoteImages != null) link.replaceInventory(remoteImages);
                 if (frame == null) replay.send(entry -> {
                     Wire.Frame urgent = null;
                     synchronized (this) {

@@ -10,6 +10,7 @@ final class Wire {
     static final int IMAGE_INVENTORY = 8, SAVED_IMAGE = 9;
     static final int IMAGE_PART = 10, SAVED_IMAGE_PART = 11, IMAGE_END = 12, IMAGE_ABORT = 13;
     static final int IMAGE_PREPARE = 14, IMAGE_READY = 15, IMAGE_PROGRESS = 16;
+    static final int DEVICE = 17, ROSTER = 18, SOURCE = 19, REFRESH = 20, REFRESH_INVENTORY = 21;
     static final int UPLOAD_PROGRESS_UNAVAILABLE = -1;
     static final int PART_LIMIT = 32 * 1024;
     private static final byte[] PART_VERSION = {67, 67, 73, 49};
@@ -104,6 +105,9 @@ final class Wire {
         final byte[] id;
         final byte[] data;
         final boolean saveImage;
+        String source;
+
+        Frame withSource(String value) { source = value; return this; }
         volatile boolean cancelled;
         long deadlineNanos;
         java.util.function.IntConsumer uploadProgress;
@@ -135,6 +139,35 @@ final class Wire {
             this.data = data;
             this.saveImage = saveImage;
         }
+    }
+
+    static byte[] deviceInventoryId(byte[] id) {
+        byte[] result = id.clone();
+        result[15] ^= 16;
+        return result;
+    }
+
+    static String deviceName(String value) {
+        String clean = value == null ? "" : value.replaceAll("[\\p{Cc}\\p{Cf}]", " ").trim();
+        if (clean.length() > 64) clean = clean.substring(0, 64).trim();
+        return clean.isEmpty() ? "未命名设备" : clean;
+    }
+
+    static byte[] nameBytes(String name) { return deviceName(name).getBytes(java.nio.charset.StandardCharsets.UTF_8); }
+    static String readName(Frame frame) { return deviceName(new String(frame.data, java.nio.charset.StandardCharsets.UTF_8)); }
+
+    static void writeHistory(OutputStream out, Frame frame) throws IOException {
+        write(out, frame);
+        if (frame.source != null) write(out, new Frame(SOURCE, frame.id, nameBytes(frame.source)));
+    }
+
+    static Frame readHistory(InputStream in) throws IOException {
+        Frame frame = read(in);
+        if (frame == null) return null;
+        Frame source = read(in);
+        if (source != null && source.kind == SOURCE && java.util.Arrays.equals(frame.id, source.id))
+            frame.source = readName(source);
+        return frame;
     }
 
     static Frame read(InputStream source) throws IOException {
@@ -175,6 +208,12 @@ final class Wire {
             case SAVED_IMAGE_PART: valid = count > 0 && count <= PART_LIMIT; break;
             case IMAGE_END: valid = count == 0 || count == 4; break;
             case IMAGE_PROGRESS: valid = count == 4; break;
+            case DEVICE:
+            case SOURCE: valid = count > 0 && count <= 256; break;
+            case ROSTER: valid = count > 0 && count <= 16384; break;
+            case REFRESH:
+            case REFRESH_INVENTORY:
+            case IMAGE_INVENTORY: valid = count >= 0 && count <= 50 * ID_SIZE && count % ID_SIZE == 0; break;
             case IMAGE_ABORT:
             case IMAGE_PREPARE:
             case IMAGE_READY:
@@ -182,7 +221,6 @@ final class Wire {
             case ACK: valid = count == 0; break;
             case HISTORY_TEXT:
             case TEXT: valid = count > 0 && count <= TEXT_LIMIT; break;
-            case IMAGE_INVENTORY: valid = count >= 0 && count <= 50 * ID_SIZE && count % ID_SIZE == 0; break;
             case SAVED_IMAGE:
             case HISTORY_IMAGE:
             case IMAGE: valid = count > 0 && count <= IMAGE_LIMIT; break;

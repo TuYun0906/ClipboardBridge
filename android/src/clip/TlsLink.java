@@ -26,7 +26,9 @@ final class TlsLink implements Closeable {
     private boolean imageParts, imageProgress;
     private volatile boolean closed;
     private volatile int acknowledgedImageBytes;
-    private Wire.Frame firstPart;
+    private Wire.Frame firstPart, incomingSource;
+    private String peerDevice;
+    String peerDevice() { return peerDevice; }
     private volatile byte[] readyImage;
     private long preparedAt;
     private java.io.ByteArrayOutputStream imageBuffer;
@@ -45,6 +47,11 @@ final class TlsLink implements Closeable {
 
     static TlsLink connect(String host, int port, byte[] pin, byte[] key,
             java.util.function.Supplier<byte[]> inventory) throws IOException {
+        return connect(host, port, pin, key, inventory, null);
+    }
+
+    static TlsLink connect(String host, int port, byte[] pin, byte[] key,
+            java.util.function.Supplier<byte[]> inventory, String deviceName) throws IOException {
         if (pin.length != 32 || key.length != Wire.KEY_SIZE)
             throw new IOException("Invalid pairing credentials");
 
@@ -69,8 +76,14 @@ final class TlsLink implements Closeable {
             link.imageProgress = inventory != null && Arrays.equals(ack.id, Wire.acceptImageProgress(id));
             link.imageParts = link.imageProgress || (inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id, true)));
             if (link.imageParts || (inventory != null && Arrays.equals(ack.id, Wire.acceptImageSync(id)))) {
-                link.readInventory();
-                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, id, inventory.get()));
+                byte[] extension = Wire.deviceInventoryId(id);
+                byte[] peerInventory = link.readInventory();
+                boolean devices = deviceName != null && link.imageProgress && Arrays.equals(peerInventory, extension);
+                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, devices ? extension : id, inventory.get()));
+                if (devices) {
+                    link.send(new Wire.Frame(Wire.DEVICE, id, Wire.nameBytes(deviceName)));
+                    link.readDevice(id);
+                }
                 link.imageSync = true;
             } else if (!Arrays.equals(ack.id, id)) throw new IOException("Pairing rejected");
             socket.setSoTimeout(0);
@@ -94,7 +107,7 @@ final class TlsLink implements Closeable {
     }
 
     static TlsLink accept(Socket transport, SSLContext context, byte[] key,
-            java.util.function.Supplier<byte[]> inventory) throws IOException {
+            java.util.function.Supplier<byte[]> inventory, String deviceName) throws IOException {
         SSLSocket socket = null;
         try {
             socket = (SSLSocket) context.getSocketFactory().createSocket(transport,
@@ -116,8 +129,14 @@ final class TlsLink implements Closeable {
             else if (upgraded) reply = Wire.acceptImageSync(hello.id, link.imageParts);
             link.send(new Wire.Frame(Wire.ACK, reply, new byte[0]));
             if (upgraded) {
-                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, hello.id, inventory.get()));
-                link.readInventory();
+                boolean devices = deviceName != null && link.imageProgress;
+                byte[] extension = Wire.deviceInventoryId(hello.id);
+                link.send(new Wire.Frame(Wire.IMAGE_INVENTORY, devices ? extension : hello.id, inventory.get()));
+                byte[] peerInventory = link.readInventory();
+                if (devices && Arrays.equals(peerInventory, extension)) {
+                    link.send(new Wire.Frame(Wire.DEVICE, hello.id, Wire.nameBytes(deviceName)));
+                    link.readDevice(hello.id);
+                }
                 link.imageSync = true;
             }
             socket.setSoTimeout(0);
@@ -140,8 +159,12 @@ final class TlsLink implements Closeable {
         for (;;) {
             Wire.Frame frame = Wire.read(socket.getInputStream());
             if (frame == null) return null;
+            if (peerDevice != null && frame.kind == Wire.SOURCE) {
+                incomingSource = frame;
+                continue;
+            }
             if (imageSync && frame.kind == Wire.SAVED_IMAGE)
-                return new Wire.Frame(Wire.IMAGE, frame.id, frame.data, true);
+                return withIncomingSource(new Wire.Frame(Wire.IMAGE, frame.id, frame.data, true));
             if (imageProgress && frame.kind == Wire.IMAGE_PROGRESS) {
                 Wire.Frame upload = writingFrame;
                 if (upload != null && upload.uploadProgress != null && Arrays.equals(upload.id, frame.id)) {
@@ -154,7 +177,7 @@ final class TlsLink implements Closeable {
                 }
                 continue;
             }
-            if (!imageParts || frame.kind < Wire.IMAGE_PART || frame.kind > Wire.IMAGE_READY) return frame;
+            if (!imageParts || frame.kind < Wire.IMAGE_PART || frame.kind > Wire.IMAGE_READY) return withIncomingSource(frame);
             if (frame.kind == Wire.IMAGE_READY) {
                 readyImage = frame.id;
                 continue;
@@ -189,8 +212,18 @@ final class TlsLink implements Closeable {
             firstPart = null;
             imageBuffer = null;
             preparedAt = 0;
-            if (completed != null) return completed;
+            if (completed != null) return withIncomingSource(completed);
+            incomingSource = null;
         }
+    }
+
+    private Wire.Frame withIncomingSource(Wire.Frame frame) {
+        if (incomingSource != null && (frame.kind == Wire.TEXT || frame.kind == Wire.IMAGE ||
+                frame.kind == Wire.HISTORY_TEXT || frame.kind == Wire.HISTORY_IMAGE)) {
+            if (Arrays.equals(incomingSource.id, frame.id)) frame.source = Wire.readName(incomingSource);
+            incomingSource = null;
+        }
+        return frame;
     }
 
     private boolean canCommit(Wire.Frame frame) throws IOException {
@@ -216,6 +249,8 @@ final class TlsLink implements Closeable {
                 if (frame.kind == Wire.HISTORY_IMAGE && knownImages.contains(key)) return;
                 if (frame.kind == Wire.DELETE) knownImages.remove(key);
                 boolean savedLive = frame.kind == Wire.IMAGE && frame.saveImage;
+                if (frame.source != null && peerDevice != null)
+                    Wire.write(socket.getOutputStream(), new Wire.Frame(Wire.SOURCE, frame.id, Wire.nameBytes(frame.source)));
                 Wire.Frame outgoing = imageSync && savedLive
                         ? new Wire.Frame(Wire.SAVED_IMAGE, frame.id, frame.data) : frame;
                 if (imageParts && frame.kind == Wire.IMAGE &&
@@ -299,7 +334,7 @@ final class TlsLink implements Closeable {
         enqueueControl(new Wire.Frame(Wire.ACK, id, new byte[0]));
     }
 
-    private void enqueueControl(Wire.Frame frame) {
+    void enqueueControl(Wire.Frame frame) {
         synchronized (acknowledgements) {
             acknowledgements.add(frame);
             if (ackWriterScheduled) return;
@@ -337,11 +372,26 @@ final class TlsLink implements Closeable {
         try { transport.close(); } catch (IOException ignored) { }
     }
 
-    private void readInventory() throws IOException {
+    private void readDevice(byte[] id) throws IOException {
+        Wire.Frame frame = read();
+        if (frame == null || frame.kind != Wire.DEVICE || !Arrays.equals(frame.id, id))
+            throw new IOException("Peer device name missing");
+        peerDevice = Wire.readName(frame);
+    }
+
+    private byte[] readInventory() throws IOException {
         Wire.Frame frame = read();
         if (frame == null || frame.kind != Wire.IMAGE_INVENTORY) throw new IOException("Image inventory missing");
-        for (int offset = 0; offset < frame.data.length; offset += Wire.ID_SIZE)
-            rememberImage(imageKey(Arrays.copyOfRange(frame.data, offset, offset + Wire.ID_SIZE)));
+        replaceInventory(frame.data);
+        return frame.id;
+    }
+
+    void replaceInventory(byte[] data) {
+        synchronized (sendLock) {
+            knownImages.clear();
+            for (int offset = 0; offset < data.length; offset += Wire.ID_SIZE)
+                rememberImage(imageKey(Arrays.copyOfRange(data, offset, offset + Wire.ID_SIZE)));
+        }
     }
 
     private void rememberImage(String key) {

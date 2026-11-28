@@ -33,6 +33,7 @@ public final class AndroidHostCheck {
             sender.send(frame(Wire.HISTORY_IMAGE, 9, "known image"));
         })) {
             host.imageInventory(() -> new byte[0]);
+            host.configureDevices("Android 主机", names -> { });
             host.start();
             try (TlsLink peer = TlsLink.connect("127.0.0.1", host.port(), pin, key)) {
                 check(peer.read(), Wire.HISTORY_TEXT, "host history");
@@ -41,10 +42,20 @@ public final class AndroidHostCheck {
                 System.out.flush();
 
                 check(received.poll(8, TimeUnit.SECONDS), Wire.TEXT, "Windows copy");
-                check(peer.read(), Wire.TEXT, "Windows copy");
+                Wire.Frame firstAfterRefresh = peer.read();
+                Wire.Frame secondAfterRefresh = peer.read();
+                if (firstAfterRefresh.kind == Wire.TEXT) {
+                    check(firstAfterRefresh, Wire.TEXT, "Windows copy");
+                    check(secondAfterRefresh, Wire.HISTORY_TEXT, "host history");
+                } else {
+                    check(firstAfterRefresh, Wire.HISTORY_TEXT, "host history");
+                    check(secondAfterRefresh, Wire.TEXT, "Windows copy");
+                }
                 for (int i = 11; i <= 13; i++) {
                     Wire.Frame image = received.poll(8, TimeUnit.SECONDS);
                     check(image, Wire.IMAGE, "image " + i);
+                    if (!"Windows 客户端".equals(image.source))
+                        throw new AssertionError("Windows image source was not relayed");
                     if (image.saveImage != (i == 11)) throw new AssertionError("Combined image negotiation");
                     if (Wire.compressionPercent(image.id) != (i == 12 ? 70 : -1)) throw new AssertionError("Compression provenance");
                     Wire.Frame forwarded = peer.read();
@@ -58,6 +69,7 @@ public final class AndroidHostCheck {
                     if (i == 22) Wire.markCompressed(image.id, 70, 100);
                     if (i == 21) image = new Wire.Frame(image.kind, image.id, image.data, true);
                     if (i == 23) image.uploadProgress = percent -> {};
+                    image.withSource("Android 主机");
                     host.submit(image, i == 23 ? delivered::countDown : null);
                     if (i == 21) host.publish(new Wire.Frame(Wire.HISTORY_IMAGE, image.id, image.data));
                 }

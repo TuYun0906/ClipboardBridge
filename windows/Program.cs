@@ -50,6 +50,29 @@ internal sealed class Program : IDisposable
     internal bool ShowWindow { get; private set; }
     internal string AddressText { get { return address == null ? "暂无可用地址" : address.ToString(); } }
     internal string Status { get; private set; }
+    internal string Feedback { get; private set; }
+    internal string Devices { get; private set; }
+    internal event Action DevicesChanged;
+    private static readonly string DeviceName = Wire.DeviceName(Environment.MachineName);
+
+    private void SetDevices(string names)
+    {
+        Devices = names;
+        if (DevicesChanged != null) DevicesChanged();
+    }
+
+    internal void RefreshHistory()
+    {
+        SetFeedback(connection != null && connection.RefreshHistory()
+            ? "已请求刷新在线设备的记录" : "请先连接支持刷新的设备");
+    }
+
+    private void SetFeedback(string value)
+    {
+        if (disposed) return;
+        Feedback = value;
+        window.RefreshStatus();
+    }
 
     [STAThread]
     private static void Main(string[] args)
@@ -274,12 +297,25 @@ internal sealed class Program : IDisposable
         catch (ExternalException) { MessageBox.Show("剪贴板正忙，请稍后重试。", "剪贴板"); }
     }
 
-    internal void Send(object content)
+    internal void Send(object content) { SendMany(new[] { content }, false); }
+
+    internal void SendMany(object[] contents, bool images)
     {
-        QueueContent(content, true);
+        if (contents.Length == 0) return;
+        int remaining = contents.Length, delivered = 0;
+        SetFeedback(images ? "正在发送图片…" : "正在发送文字…");
+        foreach (object content in contents)
+            QueueContent(content, true, success => app.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (success) delivered++;
+                if (--remaining != 0) return;
+                SetFeedback(!images ? (delivered == 1 ? "发送文字成功" : "文字发送失败") :
+                    delivered == contents.Length ? "已发送 " + delivered + " 张图片" :
+                    "已发送 " + delivered + " 张图片，" + (contents.Length - delivered) + " 张失败");
+            })));
     }
 
-    private void QueueContent(object content, bool send)
+    private void QueueContent(object content, bool send, Action<bool> complete = null)
     {
         ISyncConnection target = send ? connection : null;
         bool compress = send && CompressImages;
@@ -287,18 +323,21 @@ internal sealed class Program : IDisposable
         {
             try
             {
-                Frame frame = WindowsClipboard.ToFrame(content, compress);
+                Frame frame = WindowsClipboard.ToFrame(content, compress).WithSource(DeviceName);
                 if (target != null)
                 {
                     if (frame.Kind == Wire.Image && History.SaveImages)
-                        frame = new Frame(frame.Kind, frame.Id, frame.Data, true);
+                        frame = new Frame(frame.Kind, frame.Id, frame.Data, true).WithSource(frame.Source);
+                    frame.Completion = complete;
                     target.Submit(frame);
                 }
+                else if (complete != null) complete(false);
                 Record(frame, true);
             }
             catch (Exception error)
             {
-                app.Dispatcher.BeginInvoke(new Action(() => SetStatus("发送失败：" + error.Message)));
+                if (complete != null) complete(false);
+                else app.Dispatcher.BeginInvoke(new Action(() => SetFeedback("发送失败：" + error.Message)));
             }
         }, CancellationToken.None, TaskCreationOptions.None, encoding);
     }
@@ -308,7 +347,7 @@ internal sealed class Program : IDisposable
         if (frame.Kind >= Wire.HistoryText)
         {
             if (frame.Kind == Wire.HistoryText || frame.Kind == Wire.HistoryImage)
-                frame = new Frame(frame.Kind == Wire.HistoryText ? Wire.Text : Wire.Image, frame.Id, frame.Data);
+                frame = new Frame(frame.Kind == Wire.HistoryText ? Wire.Text : Wire.Image, frame.Id, frame.Data).WithSource(frame.Source);
             Record(frame, false, relay);
             return;
         }
@@ -344,6 +383,7 @@ internal sealed class Program : IDisposable
         if (!force && (ClientMode || Equals(selected, address)) && connection != null) return;
         if (connection != null) connection.Dispose();
         connection = null;
+        SetDevices("");
         if (ClientMode)
         {
             Uri endpoint;
@@ -360,6 +400,10 @@ internal sealed class Program : IDisposable
                     if (connection == client) SetStatus(connected ? "已连接到 Android 主机" : "正在连接 Android 主机…");
                 })), History.Replay, History.ImageInventory);
             connection = client;
+            client.ConfigureDevices(DeviceName, names => app.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (connection == client && !disposed) SetDevices(names);
+            })));
             SetStatus("正在连接 Android 主机…");
             client.Start();
             return;
@@ -379,6 +423,10 @@ internal sealed class Program : IDisposable
                     if (connection == next) SetStatus(connected ? "已连接" : "等待手机连接");
                 })), History.Replay, includeLoopback: !PublicMode, inventory: History.ImageInventory);
             connection = next;
+            next.ConfigureDevices(DeviceName, names => app.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (connection == next && !disposed) SetDevices(names);
+            })));
             next.Start();
             SetStatus("等待手机连接");
         }

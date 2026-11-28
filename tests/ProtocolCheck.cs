@@ -17,7 +17,7 @@ static class ProtocolCheck
             using (var stream = File.Create(args[1]))
             {
                 Wire.Write(stream, new Frame(Wire.Text, id, text));
-                Wire.Write(stream, new Frame(Wire.Image, imageId, image));
+                Wire.WriteHistory(stream, new Frame(Wire.Image, imageId, image) { Source = "手机 A" });
                 Wire.Write(stream, new Frame(Wire.Ack, id, new byte[0]));
             }
             return;
@@ -25,8 +25,9 @@ static class ProtocolCheck
         using (var stream = File.OpenRead(args[1]))
         {
             Check(Wire.Read(stream), Wire.Text, id, text);
-            Frame received = Wire.Read(stream);
+            Frame received = Wire.ReadHistory(stream);
             Check(received, Wire.Image, imageId, image);
+            if (received.Source != "手机 A") throw new Exception("Missing image source");
             if (Wire.CompressionLabel(received.Id, received.Data.Length) != "已压缩至原31.58%")
                 throw new Exception("Incorrect compression ratio");
             Check(Wire.Read(stream), Wire.Ack, id, new byte[0]);
